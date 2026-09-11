@@ -50,6 +50,7 @@ SKILL_ARGS = {
     "open_drawer": ("arm",),
     "pick_place": ("arm", "object"),
     "handoff": ("object", "giver", "receiver"),
+    "bimanual_place": ("object",),
     "pick_hold": ("arm", "object"),
     "pick_lift": ("arm", "object"),
     "pour": ("arm", "into"),
@@ -62,7 +63,8 @@ SYSTEM_PROMPT = """You plan actions for two robot arms, left and right, that set
 Write the plan one stage per line. Subtasks on the same line run at the same time and are separated
 by " ; ", with at most one subtask per arm. Use only these subtasks (ARM is left or right):
   open_drawer ARM
-  pick_place ARM OBJECT        (OBJECT: plate, spoon, fork or mug; picks it up AND puts it in its place)
+  pick_place ARM OBJECT        (OBJECT: spoon, fork or mug; picks it up AND puts it in its place)
+  bimanual_place plate         (both arms carry the plate level to the placemat; alone on its line)
   handoff OBJECT GIVER RECEIVER  (spoon or fork; the receiver puts it in place; alone on its line)
   pick_lift ARM bottle
   pour ARM mug
@@ -79,12 +81,13 @@ Rules:
 - Only include what the instruction asks for, skip steps listed as done, end with "home left ; home right".
 Write only the plan lines, nothing else."""
 
-EXAMPLE_INSTRUCTION = ("Open the drawer, put the mug in its place and the plate on the placemat, lay the "
-                       "fork, pour the water from the bottle into the mug, then hand the spoon from the "
-                       "left arm to the right arm.")
-EXAMPLE_PLAN_TEXT = """open_drawer left ; pick_place right mug
-pick_place left plate ; pick_lift right bottle
-pick_place left fork ; pour right mug
+EXAMPLE_INSTRUCTION = ("Carry the plate to the placemat with both hands, open the drawer and put the mug in "
+                       "its place, lay the fork, pour the water from the bottle into the mug, then hand the "
+                       "spoon from the left arm to the right arm.")
+EXAMPLE_PLAN_TEXT = """bimanual_place plate
+open_drawer left ; pick_place right mug
+pick_place left fork ; pick_lift right bottle
+pour right mug
 return right bottle
 handoff spoon left right
 home left ; home right"""
@@ -143,6 +146,12 @@ def validate(plan):
                 if sub.get("object") not in UTENSILS:
                     raise PlanValidationError(f"stage {index}: only the spoon or fork can be handed off")
                 continue
+            if sub["skill"] == "bimanual_place":
+                if len(stage) != 1:
+                    raise PlanValidationError(f"stage {index}: bimanual_place uses both arms, alone in its stage")
+                if sub.get("object") != "plate":
+                    raise PlanValidationError(f"stage {index}: only the plate is carried with both hands")
+                continue
             if sub.get("arm") not in ARMS:
                 raise PlanValidationError(f"stage {index}: subtask needs arm left/right: {sub}")
             arms_used.append(sub["arm"])
@@ -164,8 +173,13 @@ def check_semantics(plan, scene_state=None):
     for s, stage in enumerate(plan):
         for k, sub in enumerate(stage):
             skill, obj = sub["skill"], sub.get("object")
-            arms = [sub["giver"], sub["receiver"]] if skill == "handoff" else [sub["arm"]]
-            if skill in ("open_drawer", "pick_place", "handoff", "pick_hold", "pick_lift"):
+            if skill == "handoff":
+                arms = [sub["giver"], sub["receiver"]]
+            elif skill == "bimanual_place":
+                arms = list(ARMS)
+            else:
+                arms = [sub["arm"]]
+            if skill in ("open_drawer", "pick_place", "handoff", "bimanual_place", "pick_hold", "pick_lift"):
                 busy = [a for a in arms if holding[a]]
                 if busy:
                     problems.append((s, k, f"the {busy[0]} arm is still holding the {holding[busy[0]]}"))
@@ -182,7 +196,7 @@ def check_semantics(plan, scene_state=None):
                     problems.append((s, k, "pick_place only moves the plate, spoon, fork or mug"))
                 else:
                     placed.add(obj)
-            elif skill == "handoff":
+            elif skill in ("handoff", "bimanual_place"):
                 placed.add(obj)
             elif skill == "pick_hold":
                 if obj != "mug":
@@ -273,8 +287,7 @@ def keyword_plan(instruction, scene_state=None):
         else:
             plan.append([{"skill": "pick_place", "arm": "left", "object": utensil}])
     if wants("plate", "dish") and "plate_placed" not in done:
-        plan.append([{"skill": "pick_place", "arm": _arm_named_for(text, ("plate", "dish")) or "left",
-                      "object": "plate"}])
+        plan.append([{"skill": "bimanual_place", "object": "plate"}])
     if wants("pour", "water"):
         pour_arm = _arm_named_for(text, ("pour", "bottle", "water")) or "right"
         plan += [

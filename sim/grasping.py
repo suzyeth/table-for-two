@@ -33,6 +33,7 @@ UTENSIL_OVERLAP = -0.004
 PLATE_PINCH_BELOW_TOP = 0.004
 PLATE_OVERLAP = -0.003
 UTENSIL_NEIGHBOUR = 0.05  # closer than this, the other utensil decides which way the jaws face
+UTENSIL_PAD_HALF = 0.004  # pads are 8 mm wide along the handle
 SITE_LOCAL = np.array([0.012, -0.000218, -0.098127])
 UP = np.array([0.0, 0.0, 1.0])
 DOWN = -UP
@@ -76,13 +77,36 @@ def utensil_axis(env, obj, toward=None, flat=True):
     return axis
 
 
+def plate_wall_grasp(env, obj, direction):
+    """Top-down pinch on the plate wall at horizontal world ``direction`` from its centre, for
+    a two-handed carry: the thin fixed finger goes inside the plate and the moving jaw stays
+    outside (moving jaws inside the plate meet in the middle when both hands hold it)."""
+    origin, _ = env.object_frame(obj)
+    out = horizontal(direction)
+    wall_mid = PLATE["radius"] - PLATE["wall"] / 2
+    centre = origin + UP * (PLATE["height"] - PLATE_PINCH_BELOW_TOP) + out * wall_mid
+    return Grasp(centre, out, pinch_point(PLATE["wall"] / 2, PLATE_OVERLAP), False)
+
+
+def balance_offset(env, obj):
+    """Signed distance from a utensil's handle centre to the point over its centre of mass,
+    along the head direction, kept on the handle so both pads land on it."""
+    head = env.object_frame(obj)[1][:, 0]
+    offset = float((env.centre_of_mass(obj) - env.object_frame(obj)[0]) @ head)
+    limit = UTENSIL_HANDLE[0] - UTENSIL_PAD_HALF
+    return float(np.clip(offset, -limit, limit))
+
+
 def top_down_grasp(env, arm, obj, along=0.0, toward=None):
     """Top-down grasp on ``obj`` from the current (actual) object pose.
 
     ``along`` shifts a utensil grasp along its handle, measured in the direction
-    ``toward`` (used by the hand-over so each hand takes its own end).
+    ``toward`` (used by the hand-over so each hand takes its own end);
+    ``along="balance"`` grips right over the utensil's centre of mass so it hangs level.
     """
     origin, rot = env.object_frame(obj)
+    if obj in UTENSILS and along == "balance":
+        along, toward = balance_offset(env, obj), rot[:, 0]
     if obj in UTENSILS:
         # The jaws stop ~1 mm above the surface beside the handle. They open only part way;
         # if the other utensil still lies close by, the thin fixed finger goes on its side

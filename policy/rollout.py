@@ -43,7 +43,7 @@ def stage_done(env, stage, elapsed_s):
         skill, obj = sub["skill"], sub.get("object")
         if skill == "open_drawer":
             checks.append(result["drawer_open"] and env.holder("drawer") is None)
-        elif skill in ("pick_place", "handoff", "place"):
+        elif skill in ("pick_place", "handoff", "place", "bimanual_place"):
             checks.append(result[f"{obj}_placed"])
         elif skill in ("pick_hold", "pick_lift"):
             arm = ARM_KEY[sub["arm"]]

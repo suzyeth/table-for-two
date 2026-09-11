@@ -34,7 +34,6 @@ CLEARANCES = np.arange(0.010, 0.080, 0.005)  # whole bottle above the mug rim
 POUR_START_DEG = 70  # from here on water may leave, so the lip stays low over the mug
 POUR_MAX_CLEARANCE = 0.03
 POUR_HOLD_STEPS = 20
-RETURN_GAP = 0.003
 
 
 def _rotation_between(a, b):
@@ -167,15 +166,19 @@ class PourMixin:
             return
         point = self.held_point("bottle")
         lateral = self.side["sign"] * UP
-        rest = np.array([xy[0], xy[1], TABLE_TOP_Z + RETURN_GAP])
+        rest = np.array([xy[0], xy[1], TABLE_TOP_Z])
         carry = {"approach": None, "lateral": lateral, "point": point}
         yield from self.line(rest + UP * 0.05, carry, steps=10, speed=self.free_speed)
-        yield from self.line(rest, carry, steps=6)
+        yield from self.lower_until_supported("bottle", rest, carry)
         yield from self.grip(GRIPPER_OPEN)
         yield from self.wait(6)
         pinch = self.side["orient"]["point"]
+        leave = {"approach": None, "lateral": lateral, "point": pinch}
+        # Slide the fixed finger off the bottle before lifting (see ArmSkills.release_and_retreat).
+        backoff = self.point_world(pinch) - self.frame()[1][:, 0] * self.release_backoff
+        yield from self.line(backoff, leave, steps=2)
         away = self.point_world(pinch) + UP * (BOTTLE["height"] + SIDE_PRE)
-        yield from self.line(away, {"approach": None, "lateral": lateral, "point": pinch}, steps=6)
+        yield from self.line(away, leave, steps=6)
         self.side = None
 
     # ------------------------------------------------------------ helpers

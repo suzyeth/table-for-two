@@ -214,6 +214,14 @@ class DinnerTableEnv:
                 return arm
         return None
 
+    def supported(self, obj):
+        """True if ``obj`` touches anything other than the fingers (table, plate, drawer, ...)."""
+        fingers = set().union(*self.finger_bodies.values())
+        return bool(self._contact_bodies(obj) - fingers)
+
+    def centre_of_mass(self, obj):
+        return self.data.xipos[self.body_ids[obj]].copy()
+
     def touched_by_gripper(self, obj):
         touching = self._contact_bodies(obj)
         return any(touching & self.finger_bodies[arm] for arm in ARMS)

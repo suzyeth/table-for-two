@@ -72,6 +72,21 @@ def test_scene_state_counts_a_mug_already_in_place():
     assert check_semantics(plan, {"done": ["mug_placed"]}) == []
 
 
+def test_bimanual_place_needs_both_hands_free_and_its_own_line():
+    with pytest.raises(PlanValidationError):
+        parse_plan_text("bimanual_place plate ; pick_place left fork")
+    with pytest.raises(PlanValidationError):
+        parse_plan_text("bimanual_place mug")
+    messages = [m for _, _, m in check_semantics(parse_plan_text("pick_lift right bottle\nbimanual_place plate"))]
+    assert any("still holding the bottle" in m for m in messages)
+
+
+def test_keyword_fallback_carries_the_plate_with_both_hands():
+    plan = keyword_plan("Put the plate on the placemat")
+    assert [{"skill": "bimanual_place", "object": "plate"}] in plan
+    assert check_semantics(plan) == []
+
+
 def test_repair_drops_a_stray_place_step():
     plan = parse_plan_text("pick_place right plate\nplace right plate\nhome right")
     repaired = repair(plan)

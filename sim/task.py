@@ -7,6 +7,7 @@ language planner can emit them as JSON:
   {"skill": "open_drawer", "arm": "left"}
   {"skill": "pick_place", "arm": "right", "object": "mug"}      (plate, spoon, fork or mug)
   {"skill": "handoff", "object": "spoon", "giver": "left", "receiver": "right"}
+  {"skill": "bimanual_place", "object": "plate"}                 (both hands carry it level)
   {"skill": "pick_lift", "arm": "right", "object": "bottle"}
   {"skill": "pour", "arm": "right", "into": "mug"}
   {"skill": "return", "arm": "right", "object": "bottle"}
@@ -25,6 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from sim.env import ARMS, TABLE_TOP_Z, DinnerTableEnv
+from sim.bimanual import carry_together, lockstep
 from sim.grasping import horizontal, utensil_axis
 from sim.skills import ArmSkills
 
@@ -35,6 +37,10 @@ UTENSIL_PLACE_CLOSING = np.array([0.0, 1.0, 0.0])
 # Utensils are taken near the handle end facing the arms (the part out of the drawer).
 TOWARD_ARMS = np.array([-1.0, 0.0, 0.0])
 UTENSIL_PICK_ALONG = 0.015
+# Objects the hand tips level while carrying. Not the plate: pinched by one wall, levelling it
+# moves its centre of mass further from the pinch and it twists out of the fingers (audit:
+# 6-8 deg tilt without levelling, 22 deg and one drop with it).
+LEVEL_CARRY = ("mug",)
 # Hand-over: the giver turns the utensil and holds its origin at HANDOFF_POINT with the head
 # toward the receiver, 30 deg off crosswise; each hand takes its own end of the 7 cm handle,
 # 2.8 cm from the centre. Each wrist-camera mount sticks out 4-8 cm to one side of its
@@ -49,20 +55,28 @@ HANDOFF_RECEIVER_ALONG = 0.028
 # The receiver first lines up this far out on its own side, then moves in over its end.
 HANDOFF_APPROACH = 0.05
 HOLD_POINT = np.array([0.02, 0.0, TABLE_TOP_Z + 0.03])  # pick_hold: mug origin held here
+# Two-handed plate carry: the left hand pinches the wall 105 deg from +x, the right hand the
+# opposite wall. From a search over plate start and grip angle with both arms solved at the
+# start, midway and target, checking every collision body (arms, cabinet, props, table):
+# 20 mm between the arms and 12 mm to everything else throughout.
+PLATE_GRIP_DEG = 105
+BIMANUAL_OBJECTS = ("plate",)
 MAX_STEPS = 6000
 
 DEFAULT_INSTRUCTION = (
-    "Open the drawer, put the mug at the front right and the plate on the placemat, lay the fork "
-    "left of the plate, pour the water from the bottle into the mug and put the bottle back, then "
-    "hand the spoon to the right arm to lay on the right."
+    "Carry the plate to the placemat with both hands, open the drawer and put the mug at the front "
+    "right, lay the fork left of the plate, pour the water from the bottle into the mug and put "
+    "the bottle back, then hand the spoon to the right arm to lay on the right."
 )
-# The plate goes down before the fork (setting the plate beside a laid fork knocks it), and
-# the right arm finishes with the bottle before it takes the spoon.
+# The plate goes first, while the drawer is still shut (the pulled-out drawer blocks the left
+# hand's grip on the plate), and before the fork (setting a plate beside a laid fork knocks
+# it); the right arm finishes with the bottle before it takes the spoon.
 DEFAULT_PLAN = [
+    [{"skill": "bimanual_place", "object": "plate"}],
     [{"skill": "open_drawer", "arm": "left"}, {"skill": "pick_place", "arm": "right", "object": "mug"}],
-    [{"skill": "pick_place", "arm": "left", "object": "plate"},
+    [{"skill": "pick_place", "arm": "left", "object": "fork"},
      {"skill": "pick_lift", "arm": "right", "object": "bottle"}],
-    [{"skill": "pick_place", "arm": "left", "object": "fork"}, {"skill": "pour", "arm": "right", "into": "mug"}],
+    [{"skill": "pour", "arm": "right", "into": "mug"}],
     [{"skill": "return", "arm": "right", "object": "bottle"}],
     [{"skill": "handoff", "object": "spoon", "giver": "left", "receiver": "right"}],
     [{"skill": "home", "arm": "left"}, {"skill": "home", "arm": "right"}],
@@ -106,6 +120,11 @@ class Executor:
             if len(stage) != 1:
                 raise PlanError("a handoff must be the only subtask in its stage")
             return self._handoff(handoffs[0])
+        together = [s for s in stage if s.get("skill") == "bimanual_place"]
+        if together:
+            if len(stage) != 1:
+                raise PlanError("a two-handed carry must be the only subtask in its stage")
+            return self._bimanual_place(together[0])
         sub = {}
         for subtask in stage:
             arm = self._arm(subtask)
@@ -130,9 +149,10 @@ class Executor:
         if skill == "open_drawer":
             return sk.open_drawer
         if skill == "pick_place":
-            along, toward = (UTENSIL_PICK_ALONG, TOWARD_ARMS) if obj in UTENSILS else (0.0, None)
+            along, toward = ("balance", None) if obj in UTENSILS else (0.0, None)
             return lambda: _chain(sk.pick(obj, along, toward),
-                                  sk.place(obj, self._target_xy(obj), self._place_closing(obj)), sk.home())
+                                  sk.place(obj, self._target_xy(obj), self._place_closing(obj), level=obj in LEVEL_CARRY),
+                                  sk.home())
         if skill == "pick_hold":
             return lambda: _chain(sk.pick(obj), sk.carry(obj, HOLD_POINT))
         if skill == "pick_lift":
@@ -148,6 +168,18 @@ class Executor:
         if skill == "home":
             return sk.home
         raise PlanError(f"unknown skill '{skill}'")
+
+    def _bimanual_place(self, subtask):
+        """Both arms carry the object together; one generator drives both arms' commands."""
+        obj = subtask.get("object")
+        if obj not in BIMANUAL_OBJECTS:
+            raise PlanError(f"only the {', '.join(BIMANUAL_OBJECTS)} is carried with both hands")
+        angle = np.deg2rad(PLATE_GRIP_DEG)
+        left_dir = np.array([np.cos(angle), np.sin(angle), 0.0])
+        dirs = {"left_": left_dir, "right_": -left_dir}
+        both = self.skills
+        return [{"left_": lambda: _chain(carry_together(self.env, both, obj, self._target_xy(obj), dirs),
+                                          lockstep(both["left_"].home(), both["right_"].home()))}]
 
     def _handoff(self, subtask):
         giver, receiver = self._arm(subtask, "giver"), self._arm(subtask, "receiver")

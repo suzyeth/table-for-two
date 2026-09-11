@@ -18,7 +18,7 @@ from scene.build_scene import TABLE_TOP_Z, UTENSIL_HANDLE
 from sim.env import CONTROL_HZ, GRIPPER_OPEN, GRIPPER_SQUEEZE
 from sim.grasping import DOWN, PRE_HEIGHT, SITE_LOCAL, UP, horizontal, top_down_grasp
 from sim.ik import gripper_rotation
-from sim.pour import PourMixin
+from sim.pour import PourMixin, _rotation_between
 
 MAX_JOINT_SPEED = 1.2  # rad/s for free-space moves
 SLOW_JOINT_SPEED = 0.4  # rad/s near and in contact with objects
@@ -33,8 +33,11 @@ TRANSIT_TCP_Z = TABLE_TOP_Z + 0.06
 LIFT = 0.04
 SLIDE_HEIGHT = 0.004  # a sideways approach slides in this far above the grasp, then settles
 PLACE_ABOVE = 0.03
-PLACE_GAP = 0.003
+TOUCH_STEP = 0.0015  # set-down increment; with TOUCH_MIN_STEPS control steps each, ~1.5 cm/s
+TOUCH_MIN_STEPS = 2
+TOUCH_OVERSHOOT = 0.006  # keep lowering this far past the nominal rest height before giving up
 RETREAT = 0.03
+RELEASE_BACKOFF = 0.003  # after opening, move the fixed finger this far off the object before lifting
 DRAWER_PULL = 0.100
 IK_POS_TOL = 0.004  # warn beyond this
 IK_ROT_TOL = np.deg2rad(4)
@@ -52,6 +55,7 @@ class ArmSkills(PourMixin):
     free_speed = MAX_JOINT_SPEED
     slow_speed = SLOW_JOINT_SPEED
     squeeze_settle = SQUEEZE_SETTLE_STEPS
+    release_backoff = RELEASE_BACKOFF
 
     def __init__(self, env, arm):
         self.env = env
@@ -221,14 +225,17 @@ class ArmSkills(PourMixin):
                 best = (cost, orient)
         return best[1]
 
-    def pick(self, obj, along=0.0, toward=None, lift=LIFT, approach_from=None, camera_side=None):
+    def pick(self, obj, along=0.0, toward=None, lift=LIFT, approach_from=None, camera_side=None, grasp_fn=None):
         """Top-down contact grasp: descend around ``obj``, squeeze past contact, lift ``lift``.
 
         ``approach_from`` (world offset) makes the hand line up that far beside the grasp first
         and slide in over it, e.g. to stay clear of the other hand during a hand-over;
-        ``camera_side`` chooses which way a symmetric grasp faces (see _choose_orientation).
+        ``camera_side`` chooses which way a symmetric grasp faces (see _choose_orientation);
+        ``grasp_fn`` supplies the grasp instead of ``top_down_grasp`` (called again to re-measure).
         """
-        grasp = top_down_grasp(self.env, self.arm, obj, along, toward)
+        if grasp_fn is None:
+            grasp_fn = lambda: top_down_grasp(self.env, self.arm, obj, along, toward)
+        grasp = grasp_fn()
         orient = self._choose_orientation(grasp, camera_side)
         self.release_to = grasp.open_to
         above = grasp.centre + UP * PRE_HEIGHT
@@ -242,31 +249,80 @@ class ArmSkills(PourMixin):
             yield from self.transit(above, orient, grip=grasp.open_to)
         # Re-measure just before closing in: the object may have moved (e.g. sagging in the
         # other hand during a hand-over).
-        centre = top_down_grasp(self.env, self.arm, obj, along, toward).centre
+        centre = grasp_fn().centre
         yield from self.line(centre, orient, steps=6)
         yield from self.grip(GRIPPER_SQUEEZE)
         yield from self.wait(SQUEEZE_SETTLE_STEPS)
         if lift > 0:
             yield from self.line(centre + UP * lift, orient, steps=4)
 
-    def carry(self, obj, goal, closing=None):
-        """Move the held object's origin to ``goal`` with the hand top-down (optionally re-oriented)."""
+    def carry(self, obj, goal, closing=None, level=False):
+        """Move the held object's origin to ``goal`` with the hand top-down (optionally re-oriented).
+
+        ``level=True`` tips the wrist so the object is carried level: an object held off its
+        centre of mass (a plate pinched by its wall) hangs tilted in the fingers, and would
+        otherwise touch down on one edge. The tilt is measured from the actual state.
+        """
         if closing is None:
             closing = horizontal(self.frame()[1][:, 0])
-        orient = {"approach": DOWN, "closing": np.asarray(closing, dtype=float), "point": self.held_point(obj)}
+        closing = np.asarray(closing, dtype=float)
+        orient = {"approach": DOWN, "closing": closing, "point": self.held_point(obj)}
+        if level:
+            orient["approach"], orient["closing"] = self._levelling(obj, closing)
         yield from self.transit(goal, orient)
 
-    def place(self, obj, xy, closing=None):
+    def _levelling(self, obj, closing):
+        """(approach, closing) for the hand that holds ``obj`` upright, jaws heading along ``closing``."""
+        body = self.ik.gripper_body
+        up_in_hand = self.env.data.xmat[body].reshape(3, 3).T @ self.env.object_frame(obj)[1][:, 2]
+        top_down = gripper_rotation(DOWN, closing)
+        correction = _rotation_between(top_down @ up_in_hand, UP)
+        hand = correction @ top_down
+        return -hand[:, 2], hand[:, 0]
+
+    def place(self, obj, xy, closing=None, level=False):
         """Set the held object down with its origin on ``xy``, open, and back off upward."""
-        rest = np.array([xy[0], xy[1], TABLE_TOP_Z + REST_HEIGHT[obj] + PLACE_GAP])
-        yield from self.carry(obj, rest + UP * PLACE_ABOVE, closing)
-        yield from self.line(rest, self.orient, steps=5)
+        rest = np.array([xy[0], xy[1], TABLE_TOP_Z + REST_HEIGHT[obj]])
+        yield from self.carry(obj, rest + UP * PLACE_ABOVE, closing, level)
+        yield from self.lower_until_supported(obj, rest)
         yield from self.release_and_retreat()
 
+    def lower_until_supported(self, obj, rest, orient=None):
+        """Lower the held object slowly until it rests on something, like setting a cup down.
+
+        Moves the controlled point toward ``rest`` in TOUCH_STEP increments at ~1.5 cm/s and
+        stops at the first contact between the object and anything but the fingers, so the
+        object is never let go in mid-air however it sits in the hand.
+        """
+        orient = orient or self.orient
+        self.orient = orient
+        here = self.point_world(orient.get("point"))
+        floor = np.asarray(rest, dtype=float) - UP * TOUCH_OVERSHOOT
+        distance = float(np.linalg.norm(floor - here))
+        steps = max(1, int(np.ceil(distance / TOUCH_STEP)))
+        for k in range(1, steps + 1):
+            if self.env.supported(obj):
+                break
+            q, _ = self.solve(here + (floor - here) * k / steps, orient)
+            yield from self._to(q, None, SLOW_JOINT_SPEED, TOUCH_MIN_STEPS, settle=0)
+        if not self.env.supported(obj):
+            self.warnings.append(f"{self.arm} set {obj} down without it touching a support")
+        yield from self.wait(SETTLE_STEPS)
+
     def release_and_retreat(self):
-        """Open only as far as on the way in (a wide-open jaw can shove what it just let go)."""
+        """Open, slide the fixed finger off the object, then lift away.
+
+        Opens only as far as on the way in (a wide-open jaw can shove what it just let go).
+        Lifting straight after opening is not enough: the fixed finger can still press on the
+        object - two hands holding a plate from inside its walls spread it like chopsticks and
+        lifted it 11 cm before dropping it - so the hand first moves back along the closing
+        axis, away from the object.
+        """
         yield from self.grip(self.release_to)
         yield from self.wait(2 * SETTLE_STEPS)
+        closing = self.frame()[1][:, 0]
+        here = self.point_world(self.orient.get("point"))
+        yield from self.line(here - closing * RELEASE_BACKOFF, self.orient, steps=2)
         here = self.point_world(self.orient.get("point"))
         yield from self.line(here + UP * RETREAT, self.orient, steps=3)
 
