@@ -85,7 +85,7 @@ WATER = {"count": 24, "radius": 0.004, "mass": 0.00027, "rgba": [0.35, 0.6, 1.0,
 # contact line that resists the plate pivoting (a flat rim only gives point contact).
 # Starts in the open middle of the table: both hands carry it (sim/bimanual.py), and next to
 # the cabinet the left hand's moving jaw hits the cabinet front.
-PLATE = {"pos": (0.05, 0.00), "radius": 0.045, "height": 0.020, "wall": 0.003, "mass": 0.12, "rgba": CERAMIC}
+PLATE = {"pos": (0.05, 0.00), "radius": 0.045, "height": 0.020, "wall": 0.005, "mass": 0.12, "rgba": CERAMIC}
 # Utensils lie front-to-back in the drawer like in a cutlery drawer: long axis along x,
 # head toward the back (+x), handle ends toward the arms so they come out first. They sit
 # 4.8 cm apart so the jaws, closing sideways, keep the moving finger's back (~2.5 cm out)

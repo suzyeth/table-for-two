@@ -67,7 +67,7 @@ LINK_PENETRATION = 0.001
 # Object dimensions (m) and default placement in front of the arm base.
 BOTTLE = {"radius": 0.016, "half_height": 0.035, "xy": (0.20, 0.0)}
 MUG = {"radius": 0.020, "half_height": 0.030, "xy": (0.20, 0.0)}
-PLATE = {"radius": 0.045, "height": 0.020, "wall": 0.003, "xy": (0.24, 0.0)}  # deep plate (low wall)
+PLATE = {"radius": 0.045, "height": 0.020, "wall": 0.005, "xy": (0.24, 0.0)}  # deep plate (low wall), as in the scene
 SHELL_SEGMENTS = 16
 SPOON = {"half_size": (0.035, 0.005, 0.005), "xy": (0.20, 0.0)}  # 10 mm square handle, as in the scene
 

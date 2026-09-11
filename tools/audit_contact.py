@@ -48,73 +48,84 @@ def velocity(env, obj):
 
 
 class Watcher:
+    """Tracks every "hold": from the moment an object leaves its support while a finger touches it
+    until no finger touches it any more. Works for one hand, two hands on one object, and a
+    hand-over (the set of touching arms changes while the object is in the air)."""
+
     def __init__(self, env, executor):
         self.env, self.executor = env, executor
-        self.prev_holder = {o: None for o in PROPS}
         self.hold = {}  # obj -> dict for the current held phase
         self.falling = {}  # obj -> dict for an object in free fall after release
         self.events = []
 
+    def touching_arms(self, obj):
+        bodies = self.env._contact_bodies(obj)
+        return {arm for arm in ARMS if bodies & self.env.finger_bodies[arm]}
+
     def step(self, stage):
         env = self.env
         for obj in PROPS:
-            holder = env.holder(obj)
-            prev = self.prev_holder[obj]
-            if holder and not prev:
-                self._start_hold(obj, holder, stage)
-            elif holder and prev and holder != prev and obj in self.hold:  # hand-over: new hand took it
-                self._release(obj, prev, stage)
-                self._start_hold(obj, holder, stage)
-            elif holder and obj in self.hold:
-                self._during_hold(obj, stage)
-            elif prev and not holder and obj in self.hold:
-                self._release(obj, prev, stage)
+            arms = self.touching_arms(obj)
+            supported = bool(supports(env, obj))
+            if obj in self.hold:
+                if not arms:
+                    self._release(obj, stage, supported)
+                else:
+                    self._during_hold(obj, stage, arms, supported)
+            elif arms and not supported:
+                self._start_hold(obj, arms, stage)
             if obj in self.falling:
                 self._during_fall(obj)
-            self.prev_holder[obj] = holder
 
     def _gripper_frame(self, arm):
         body = self.env.ik[arm].gripper_body
         return self.env.data.xpos[body].copy(), self.env.data.xmat[body].reshape(3, 3).copy()
 
-    def _start_hold(self, obj, arm, stage):
+    def _local(self, obj, arm):
         pos, rot = self._gripper_frame(arm)
-        origin = self.env.object_frame(obj)[0]
-        self.hold[obj] = {"arm": arm, "stage": stage, "ref_attitude": attitude(self.env, obj),
-                          "ref_local": rot.T @ (origin - pos), "max_tilt": 0.0, "max_slip": 0.0,
-                          "supported": bool(supports(self.env, obj)), "touchdown_speed": None}
+        return rot.T @ (self.env.object_frame(obj)[0] - pos)
 
-    def _during_hold(self, obj, stage):
+    def _start_hold(self, obj, arms, stage):
+        self.hold[obj] = {"arms": set(arms), "first_arms": set(arms), "stage": stage,
+                          "ref_attitude": attitude(self.env, obj), "ref_local": {a: self._local(obj, a) for a in arms},
+                          "max_tilt": 0.0, "max_slip": 0.0, "supported": False, "touchdown_speed": None,
+                          "handed_over": False}
+
+    def _during_hold(self, obj, stage, arms, supported):
         h = self.hold[obj]
         env = self.env
+        if arms != h["arms"]:
+            if arms - h["first_arms"]:  # a new hand took it
+                h["handed_over"] = True
+            for a in arms - set(h["ref_local"]):
+                h["ref_local"][a] = self._local(obj, a)
+            h["arms"] = set(arms)
         if obj in UTENSIL_OBJECTS:
             # Sag: change in the long axis' elevation (turning it in the horizontal plane is intended).
             now = float(np.degrees(np.arcsin(np.clip(attitude(env, obj)[2], -1, 1))))
             ref = float(np.degrees(np.arcsin(np.clip(h["ref_attitude"][2], -1, 1))))
             h["max_tilt"] = max(h["max_tilt"], abs(now - ref))
-        elif not (obj == "bottle" and "pour" in stage):
+        elif not (obj == "bottle" and h["stage"] != stage):  # the bottle's own pour tilt is intended
             cos = np.clip(attitude(env, obj) @ h["ref_attitude"], -1, 1)
             h["max_tilt"] = max(h["max_tilt"], float(np.degrees(np.arccos(cos))))
-        pos, rot = self._gripper_frame(h["arm"])
-        local = rot.T @ (env.object_frame(obj)[0] - pos)
-        h["max_slip"] = max(h["max_slip"], float(np.linalg.norm(local - h["ref_local"])))
-        supported = bool(supports(env, obj))
+        for a in arms:
+            slip = float(np.linalg.norm(self._local(obj, a) - h["ref_local"][a]))
+            h["max_slip"] = max(h["max_slip"], slip)
         if supported and not h["supported"]:
             speed = float(-velocity(env, obj)[2])
             h["touchdown_speed"] = speed if h["touchdown_speed"] is None else max(h["touchdown_speed"], speed)
         h["supported"] = supported
 
-    def _release(self, obj, arm, stage):
+    def _release(self, obj, stage, resting):
         env = self.env
         h = self.hold.pop(obj)
-        squeezing = self.executor.skills[arm].cmd[5] < SQUEEZING
-        taken_over = env.holder(obj) not in (None, arm)
-        resting = bool(supports(env, obj)) or taken_over
-        event = {"object": obj, "arm": arm, "picked_in": h["stage"], "released_in": stage,
+        squeezing = any(self.executor.skills[a].cmd[5] < SQUEEZING for a in h["arms"])
+        event = {"object": obj, "arm": "+".join(sorted(h["first_arms"])) + ("->" + "+".join(sorted(h["arms"])) if h["handed_over"] else ""),
+                 "picked_in": h["stage"], "released_in": stage,
                  "in_hand_tilt_deg": round(h["max_tilt"], 1), "in_hand_slip_mm": round(h["max_slip"] * 1000, 1),
                  "touchdown_speed_mps": None if h["touchdown_speed"] is None else round(h["touchdown_speed"], 3),
-                 "resting_on_support_at_release": resting, "handed_over": bool(taken_over),
-                 "lost_while_squeezing": bool(squeezing and not taken_over),
+                 "resting_on_support_at_release": bool(resting), "handed_over": h["handed_over"],
+                 "lost_while_squeezing": bool(squeezing and not resting),
                  "tilt_at_release_deg": round(env.tilt_deg(obj), 1) if obj not in UTENSIL_OBJECTS else None}
         self.events.append(event)
         if not resting:
@@ -124,7 +135,7 @@ class Watcher:
         f = self.falling[obj]
         speed = float(np.linalg.norm(velocity(self.env, obj)))
         f["max_speed"] = max(f["max_speed"], speed)
-        if supports(self.env, obj) or self.env.holder(obj):
+        if supports(self.env, obj) or self.touching_arms(obj):
             z = float(self.env.object_frame(obj)[0][2])
             f["event"]["drop_height_mm"] = round((f["z0"] - z) * 1000, 1)
             f["event"]["drop_impact_speed_mps"] = round(f["max_speed"], 3)
@@ -146,7 +157,7 @@ def audit(seeds):
             fall = (f" DROPPED {e.get('drop_height_mm', '?')} mm at {e.get('drop_impact_speed_mps', '?')} m/s"
                     if not e["resting_on_support_at_release"] else "")
             lost = " LOST WHILE SQUEEZING" if e["lost_while_squeezing"] else ""
-            print(f"  {e['object']:6s} {e['arm']:6s} {e['picked_in']:28s} -> {e['released_in']:28s} "
+            print(f"  {e['object']:6s} {e['arm']:13s} {e['picked_in']:28s} -> {e['released_in']:28s} "
                   f"tilt {e['in_hand_tilt_deg']:5.1f} deg  slip {e['in_hand_slip_mm']:5.1f} mm  "
                   f"touchdown {e['touchdown_speed_mps']} m/s  rest-tilt {e['tilt_at_release_deg']}{fall}{lost}")
     env.close()
