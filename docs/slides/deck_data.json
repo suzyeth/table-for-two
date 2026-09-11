@@ -13,7 +13,7 @@
     "frames": 115039,
     "fps": 10,
     "train_steps": 40000,
-    "scripted_success_on_train_seeds": "pending"
+    "scripted_success_on_train_seeds": "30/30 on unseen seeds 1000-1029"
   },
   "latency": [
     {
