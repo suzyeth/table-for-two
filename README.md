@@ -103,9 +103,12 @@ skills were debugged on, so they are reported next to a block of 30 seeds
 | Bottle put back | 10/10 | FRESH_BOTTLE |
 | **Full task** | **10/10** | **FRESH_ALL** |
 
-`tools/audit_contact.py` checks every hold on the same seeds: no object is
-released in mid-air, none is lost while the fingers squeeze, and touch-down
-speeds stay under 0.05 m/s.
+`tools/audit_contact.py` checks every hold on seeds 0–9 (`out/audit_contact_final.txt`):
+no object is lost while the fingers squeeze; every set-down touches the table
+at ≤ 0.031 m/s before the fingers open (one exception: on seed 1 the fork was
+let go 0.4 mm up, landing at 0.05 m/s). In the hand, the plate tilts up to
+10° and shifts up to 13 mm when one arm carries more of it; the spoon sags
+8–17° during the hand-over; the mug and the fork stay within 4°.
 
 **Language planner on Intel hardware** (`bench/benchmark.py`, 5 instructions,
 measured with an earlier prompt that lacked the two-handed plate rule; to be
@@ -137,7 +140,9 @@ two ways: isolated single-call (zero inputs, 200 calls) and in-the-loop
   spoon hand-over.
 - **The hand-over holds the spoon off its balance point** (each hand 2.8 cm from
   the handle centre, the only collision-free layout found), so the spoon sags
-  10–13° in the hands; it is still set down by touch.
+  8–17° in the hands; it is still set down by touch.
+- **During the pour the bottle can graze the mug rim** (seed 9: an 8 N bump,
+  the mug moved 0.9 mm, all 24 beads still landed inside).
 - **Water is 24 beads**, not a fluid: each is a sphere of 4 mm radius and
   0.27 g (6.5 ml in all), a granular proxy that pours like lentils. Container
   bases are 8 mm thick; with 5 mm bases the beads tunnelled through the disc.
