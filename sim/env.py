@@ -18,7 +18,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from scene.build_scene import MUG as SCENE_MUG
+from scene.build_scene import BOTTLE as SCENE_BOTTLE, MUG as SCENE_MUG
 from sim.ik import ArmIK
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +44,11 @@ PLACE_TOL = 0.03
 UPRIGHT_TOL_DEG = 12
 DRAWER_OPEN_MIN = 0.045
 POUR_FRACTION = 0.6
+MAX_SPILLED = 2  # beads allowed outside both containers (a real pour may lose a drop)
+BEAD_REST_SPEED = 0.05  # m/s; a bead faster than this is still falling or splashing
+BOTTLE_INNER_RADIUS = SCENE_BOTTLE["radius"] - SCENE_BOTTLE["wall"]
+BOTTLE_HEIGHT = SCENE_BOTTLE["height"]
+LIFTED_MIN = 0.06  # the bottle must have been raised this far for "returned" to mean anything
 MUG_INNER_RADIUS = SCENE_MUG["radius"] - SCENE_MUG["wall"]
 MUG_HEIGHT = SCENE_MUG["height"]
 
@@ -75,11 +80,16 @@ class DinnerTableEnv:
         self.body_ids = {o: m.body(o).id for o in PROPS + ("drawer",)}
         self.tcp_site = {a: m.site(a + "gripperframe").id for a in ARMS}
         self.handle_geom = m.geom("drawer_handle").id
+        self.table_body = m.body("table").id
         self.drawer_qadr = m.jnt_qposadr[m.joint("drawer_slide").id]
         self.free_qadr = {o: m.jnt_qposadr[m.joint(o + "_free").id] for o in PROPS}
         self.prop_geoms = {o: np.array([g for g in range(m.ngeom) if m.geom_bodyid[g] == self.body_ids[o]])
                            for o in PROPS}
         self.finger_bodies = {a: {m.body(a + b).id for b in FINGER_BODIES} for a in ARMS}
+        # Finger pad geoms: their friction (contact priority 1) is what every grasp uses.
+        all_fingers = set().union(*self.finger_bodies.values())
+        self.pad_geoms = np.array([g for g in range(m.ngeom) if m.geom_bodyid[g] in all_fingers
+                                   and (m.geom_contype[g] or m.geom_conaffinity[g])])
         self.fixed_jaw = {a: m.body(a + "gripper").id for a in ARMS}
         self.moving_jaw = {a: m.body(a + "moving_jaw_so101_v1").id for a in ARMS}
         self.water_ids = np.array([m.body(f"water_{i}").id for i in range(WATER_COUNT)])
@@ -145,6 +155,12 @@ class DinnerTableEnv:
                 m.body_inertia[body] *= mass_s
                 m.geom_friction[self.prop_geoms[obj], 0] *= fric_s
                 variation[obj] = {"mass_scale": round(mass_s, 3), "friction_scale": round(fric_s, 3)}
+            # Grip friction: the pad geoms win every finger-object contact (priority), so the
+            # per-object scale above only changes object-on-table sliding; this one changes grasps.
+            grip_s = rng.uniform(*FRICTION_SCALE)
+            m.geom_friction[self.pad_geoms, 0] *= grip_s
+            variation["grip_friction_scale"] = round(grip_s, 3)
+            mujoco.mj_setConst(m, d)  # refresh mass-derived constants after the mass scaling
             light_s = rng.uniform(*LIGHT_SCALE)
             m.light_diffuse[:] *= light_s
             m.vis.headlight.diffuse[:] *= light_s
@@ -153,10 +169,14 @@ class DinnerTableEnv:
             variation["light_scale"] = round(light_s, 3)
         self.variation = variation
         self.drawer_max = 0.0
+        self.bottle_lift_max = 0.0
         self.time_step = 0
+        for i, arm in enumerate(ARMS):  # IK restarts draw from a per-episode stream: runs are repeatable
+            self.ik[arm].rng = np.random.default_rng(2 * seed + i)
         mujoco.mj_forward(m, d)
         for _ in range(SETTLE_STEPS):
             mujoco.mj_step(m, d)
+        self.bottle_start = self.object_frame("bottle")[0].copy()
         return self.observe()
 
     # ---------------------------------------------------------------- control
@@ -168,8 +188,14 @@ class DinnerTableEnv:
         for _ in range(self.substeps):
             mujoco.mj_step(self.model, self.data)
         self.drawer_max = max(self.drawer_max, float(self.data.qpos[self.drawer_qadr]))
+        self.bottle_lift_max = max(self.bottle_lift_max, float(self.data.xpos[self.body_ids["bottle"]][2]))
         self.time_step += 1
         return self.observe()
+
+    def hold(self, seconds=1.0):
+        """Keep the current joint targets for ``seconds`` so everything comes to rest before scoring."""
+        for _ in range(int(round(seconds * CONTROL_HZ))):
+            self.step(self.data.ctrl[np.concatenate([self.act_idx[a] for a in ARMS])])
 
     def arm_qpos(self, arm):
         return self.data.qpos[self.qpos_idx[arm]].copy()
@@ -245,26 +271,58 @@ class DinnerTableEnv:
         z_axis = self.data.xmat[self.body_ids[obj]].reshape(3, 3)[:, 2]
         return float(np.degrees(np.arccos(np.clip(z_axis[2], -1.0, 1.0))))
 
-    def water_in_mug(self):
-        """Number of water beads inside the mug's inner volume."""
-        origin, rot = self.object_frame("mug")
+    def _beads_inside(self, obj, radius, height):
+        origin, rot = self.object_frame(obj)
         local = (self.data.xpos[self.water_ids] - origin) @ rot
         radial = np.linalg.norm(local[:, :2], axis=1)
-        return int(np.sum((radial < MUG_INNER_RADIUS) & (local[:, 2] > 0.0) & (local[:, 2] < MUG_HEIGHT)))
+        return (radial < radius) & (local[:, 2] > -0.002) & (local[:, 2] < height)
+
+    def water_census(self):
+        """Beads resting in the mug, still in the bottle, and spilled anywhere else."""
+        speeds = np.array([np.linalg.norm(self.data.qvel[self.model.body_dofadr[b]:self.model.body_dofadr[b] + 3])
+                           for b in self.water_ids])
+        resting = speeds < BEAD_REST_SPEED
+        in_mug = self._beads_inside("mug", MUG_INNER_RADIUS, MUG_HEIGHT) & resting
+        in_bottle = self._beads_inside("bottle", BOTTLE_INNER_RADIUS, BOTTLE_HEIGHT)
+        return {"mug": int(in_mug.sum()), "bottle": int((in_bottle & ~in_mug).sum()),
+                "spilled": int((~in_mug & ~in_bottle).sum())}
+
+    def water_in_mug(self):
+        return self.water_census()["mug"]
+
+    def _rests_on_table(self, obj):
+        """The object touches the table (or placemat) and nothing else but, possibly, the fingers."""
+        ignored = set().union(*self.finger_bodies.values()) | set(self.water_ids.tolist())
+        touching = self._contact_bodies(obj) - ignored
+        return bool(touching) and touching <= {self.table_body}
 
     def _placed(self, obj):
         origin, _ = self.object_frame(obj)
         target = self.data.site_xpos[self.targets[obj]]
-        on_table = origin[2] < TABLE_TOP_Z + 0.02
         upright = obj in UTENSILS or self.tilt_deg(obj) < UPRIGHT_TOL_DEG
-        return bool(np.linalg.norm(origin[:2] - target[:2]) < PLACE_TOL and on_table and upright
-                    and not self.touched_by_gripper(obj))
+        return bool(np.linalg.norm(origin[:2] - target[:2]) < PLACE_TOL and self._rests_on_table(obj)
+                    and upright and not self.touched_by_gripper(obj))
+
+    def _poured(self):
+        """Most of the water is in the mug and almost none on the table."""
+        census = self.water_census()
+        return bool(census["mug"] >= POUR_FRACTION * WATER_COUNT and census["spilled"] <= MAX_SPILLED)
+
+    def _bottle_returned(self):
+        """The bottle was lifted at some point and now stands upright, released, where it started."""
+        origin = self.object_frame("bottle")[0]
+        lifted = self.bottle_lift_max > TABLE_TOP_Z + LIFTED_MIN
+        return bool(lifted and np.linalg.norm(origin[:2] - self.bottle_start[:2]) < PLACE_TOL
+                    and self._rests_on_table("bottle") and self.tilt_deg("bottle") < UPRIGHT_TOL_DEG
+                    and not self.touched_by_gripper("bottle"))
 
     def success(self):
+        """Sub-goal checks from the current physical state (the drawer must still be open now)."""
         checks = {
-            "drawer_open": bool(self.drawer_max > DRAWER_OPEN_MIN),
+            "drawer_open": bool(self.data.qpos[self.drawer_qadr] > DRAWER_OPEN_MIN),
             **{f"{o}_placed": self._placed(o) for o in PLACE_ITEMS},
-            "poured": bool(self.water_in_mug() >= POUR_FRACTION * WATER_COUNT),
+            "poured": self._poured(),
+            "bottle_returned": self._bottle_returned(),
         }
         checks["all"] = all(checks.values())
         return checks

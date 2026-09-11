@@ -41,7 +41,8 @@ CARD_SECONDS = {"title": 4, "plan": 7, "results": 7, "latency": 6, "closing": 5}
 
 
 def font(size, bold=False):
-    names = ("arialbd.ttf", "segoeuib.ttf") if bold else ("arial.ttf", "segoeui.ttf")
+    names = (("arialbd.ttf", "segoeuib.ttf", "DejaVuSans-Bold.ttf") if bold
+             else ("arial.ttf", "segoeui.ttf", "DejaVuSans.ttf"))
     for name in names:
         try:
             return ImageFont.truetype(name, size)
@@ -113,9 +114,11 @@ def results_card(data):
     columns = [("Sub-goal", 48), ("Scripted", 560), ("Learned policy", 760), ("Hybrid", 1020)]
     for name, x in columns:
         draw.text((x, 120), name, font=font(24, bold=True), fill=MUTED)
-    rows = list(zip(data["subgoals"], data["scripted_10_seeds"], data["policy_10_seeds"] or [None] * 6,
-                    data["hybrid_10_seeds"] or [None] * 6))
-    rows.append(("Full task", 10, data.get("policy_full_task"), data.get("hybrid_full_task")))
+    count = len(data["subgoals"])
+    rows = list(zip(data["subgoals"], data["scripted_10_seeds"], data["policy_10_seeds"] or [None] * count,
+                    data["hybrid_10_seeds"] or [None] * count))
+    rows.append(("Full task", data.get("scripted_full_task", 10), data.get("policy_full_task"),
+                 data.get("hybrid_full_task")))
     for index, (name, scripted, policy, hybrid) in enumerate(rows):
         y = 170 + index * 58
         last = index == len(rows) - 1
@@ -124,7 +127,8 @@ def results_card(data):
         style = font(26, bold=last)
         draw.text((48, y), name, font=style, fill=INK)
         for value, x, colour in ((scripted, 560, GOOD), (policy, 760, INK), (hybrid, 1020, INK)):
-            draw.text((x, y), "pending" if value is None else f"{value}/10", font=style, fill=colour)
+            label = "pending" if value is None else (value if isinstance(value, str) else f"{value}/10")
+            draw.text((x, y), label, font=style, fill=colour)
     if data.get("failure_note"):
         for i, line in enumerate(textwrap.wrap(data["failure_note"], 95)):
             draw.text((48, 640 + 28 * i), line, font=font(20), fill=BLUE)

@@ -76,8 +76,9 @@ Rules:
 - pick_place already puts the object down: never add place after it.
 - To pour, the mug must already stand in its place (pick_place ARM mug); then, with one arm,
   "pick_lift ARM bottle", "pour ARM mug", "return ARM bottle", each on its own line.
-- Use the arm the user names. Otherwise left handles the drawer, fork and plate, right handles the mug
-  and the bottle, and the spoon goes from left to right with a handoff.
+- Use the arm the user names. Otherwise left handles the drawer and fork, right handles the mug and
+  the bottle, the plate is carried with both hands (bimanual_place), and the spoon goes from left to
+  right with a handoff.
 - Only include what the instruction asks for, skip steps listed as done, end with "home left ; home right".
 Write only the plan lines, nothing else."""
 

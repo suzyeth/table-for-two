@@ -53,13 +53,15 @@ def main():
 
     if not args.model.exists():
         raise SystemExit(f"{args.model} not found; run: python -m piper.download_voices en_US-lessac-medium "
-                         f"--data-dir {args.model.parent}")
+                         f"--download-dir {args.model.parent}")
     narration = json.loads(NARRATION.read_text(encoding="utf-8"))
     deck = json.loads(DECK_DATA.read_text(encoding="utf-8"))
     voice = PiperVoice.load(str(args.model))
     args.out_dir.mkdir(parents=True, exist_ok=True)
     durations, script = {}, {}
     for segment in SEGMENTS:
+        if segment == "results" and (deck.get("policy_full_task") is None or deck.get("hybrid_full_task") is None):
+            raise SystemExit("deck_data.json has no learned-policy results yet; run tools/fill_results.py first")
         text = fill(narration[segment], deck)
         durations[segment] = round(synthesize(voice, text, args.out_dir / f"{segment}.wav"), 2)
         script[segment] = text

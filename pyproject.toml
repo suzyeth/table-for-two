@@ -1,0 +1,10 @@
+[project]
+name = "table-for-two"
+version = "0.2.0"
+description = "Two SO-101 arms set a dinner table in MuJoCo with contact-only grasps, planned and driven on OpenVINO"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

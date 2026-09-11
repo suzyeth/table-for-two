@@ -8,8 +8,11 @@ pads hold it by friction. For each object the lab
      arm link touching the table or the object at pre-grasp or grasp pose,
   3. runs the first feasible candidate: straight-line approach, close past
      contact so the servo keeps squeezing, lift 10 cm and hold,
-  4. measures rise and slip relative to the fingers, sweeping mass and friction
-     (the perturbations the brief scores).
+  4. measures rise and slip relative to the fingers, sweeping object mass and
+     finger-pad friction (the perturbations the brief scores).
+
+The gripper is the scene's realistic one (sustained servo torque, stated pad
+friction), not Menagerie's stall-torque, mu = 1 default.
 
 Why sideways skew: the SO-101 has 5 joints before the gripper and its TCP sits
 1.2 cm off the wrist-roll axis. Pointing the fingers down at a tilt *and*
@@ -39,6 +42,7 @@ import mujoco
 import numpy as np
 from PIL import Image
 
+from scene.build_scene import realistic_gripper
 from sim.ik import ArmIK, gripper_rotation
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -65,7 +69,7 @@ BOTTLE = {"radius": 0.016, "half_height": 0.035, "xy": (0.20, 0.0)}
 MUG = {"radius": 0.020, "half_height": 0.030, "xy": (0.20, 0.0)}
 PLATE = {"radius": 0.045, "height": 0.020, "wall": 0.003, "xy": (0.24, 0.0)}  # deep plate (low wall)
 SHELL_SEGMENTS = 16
-SPOON = {"half_size": (0.035, 0.006, 0.003), "xy": (0.20, 0.0)}
+SPOON = {"half_size": (0.035, 0.005, 0.005), "xy": (0.20, 0.0)}  # 10 mm square handle, as in the scene
 
 
 @dataclass(frozen=True)
@@ -166,7 +170,9 @@ def candidates(name, obj_pos, base_pos):
                                    tuple(toward_centre), PLATE["wall"] / 2, -0.003))
     elif name == "spoon":
         # Fingertips stop ~1 mm above the table beside the 6 mm-thick handle.
-        specs.append(GraspSpec("spoon top-down", tuple(obj_pos), tuple(-UP), (1, 0, 0), 0.006, 0.0015))
+        # Pinch point 4 mm below the TCP so the jaws (8 mm below it) stop 1 mm above the table.
+        specs.append(GraspSpec("spoon top-down", tuple(obj_pos), tuple(-UP), (1, 0, 0), SPOON["half_size"][1], -0.004,
+                               clearance=0.002))
     return specs
 
 
@@ -187,6 +193,9 @@ def build(object_name, mass, friction):
     arm.meshdir = str((SO101 / "assets").resolve())
     with contextlib.redirect_stderr(io.StringIO()):
         spec.attach(arm, prefix=PREFIX, frame=spec.worldbody.add_frame(pos=[0, 0, 0]))
+        # Same gripper as the scene; the sweep's ``friction`` sets the finger pads, which
+        # (contact priority) is what every finger-object contact actually uses.
+        realistic_gripper(spec, PREFIX, pad_friction=friction)
         add_object(spec, object_name, mass, friction)
         return spec.compile()
 

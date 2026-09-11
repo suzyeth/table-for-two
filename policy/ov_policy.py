@@ -73,7 +73,13 @@ class OVActPolicy:
 
     def __init__(self, xml_path, pretrained_dir, device="CPU"):
         xml_path = Path(xml_path)
-        meta = json.loads(xml_path.with_suffix(".json").read_text(encoding="utf-8"))
+        meta_path = xml_path.with_suffix(".json")
+        if not xml_path.exists() or not meta_path.exists():
+            raise SystemExit(f"no OpenVINO policy at {xml_path}: download the release assets into models/policy/ "
+                             "or run policy/train.py then policy/export_openvino.py (see README, 'Learned policy')")
+        if not Path(pretrained_dir).exists():
+            raise SystemExit(f"no checkpoint at {pretrained_dir}: download the release assets into outputs/ or train")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
         self.image_keys = meta["image_keys"]
         self.n_action_steps = meta["n_action_steps"]
         self.device = device

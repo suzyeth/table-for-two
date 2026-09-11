@@ -62,6 +62,7 @@ HOLD_POINT = np.array([0.02, 0.0, TABLE_TOP_Z + 0.03])  # pick_hold: mug origin 
 PLATE_GRIP_DEG = 105
 BIMANUAL_OBJECTS = ("plate",)
 MAX_STEPS = 6000
+SETTLE_BEFORE_SCORING_S = 1.0
 
 DEFAULT_INSTRUCTION = (
     "Carry the plate to the placemat with both hands, open the drawer and put the mug at the front "
@@ -258,6 +259,7 @@ def run_seed(env, executor, seed, plan, video=None, video_camera="operator", vid
             frames.append(env.render(video_camera))
 
     steps = executor.run(plan, on_step=record, verbose=verbose)
+    env.hold(SETTLE_BEFORE_SCORING_S)  # let beads, plate and utensils come to rest before scoring
     result = env.success()
     if video is not None:
         video.extend(frames)

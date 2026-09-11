@@ -81,7 +81,7 @@ def main():
     args = parser.parse_args()
 
     if not (args.dataset_root / "meta" / "info.json").exists():
-        raise SystemExit(f"no LeRobot dataset at {args.dataset_root}; run: python -m data.record --episodes 50")
+        raise SystemExit(f"no LeRobot dataset at {args.dataset_root}; run: python -m data.record --episodes 150")
     if args.output_dir.exists():
         raise SystemExit(f"{args.output_dir} exists; choose another --output-dir or remove it first")
 

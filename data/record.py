@@ -83,12 +83,13 @@ def record_episode(env, executor, seed):
         frames.append(frame)
 
     executor.run(DEFAULT_PLAN, on_step=capture)
+    env.hold(1.0)  # score the episode once everything has come to rest
     return frames, env.success()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Record successful scripted episodes to a LeRobot dataset.")
-    parser.add_argument("--episodes", type=int, default=50, help="number of successful episodes to keep")
+    parser.add_argument("--episodes", type=int, default=150, help="number of successful episodes to keep")
     parser.add_argument("--start-seed", type=int, default=FIRST_TRAIN_SEED)
     parser.add_argument("--max-tries", type=int, default=200)
     parser.add_argument("--root", type=Path, default=DATA_ROOT)

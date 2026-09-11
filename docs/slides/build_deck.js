@@ -58,15 +58,14 @@ function bullets(items) {
   s.background = { color: C.light };
   title(s, "The brief: set a dinner table with two arms");
   body(s, bullets([
-    "Open the drawer and take out the spoon and fork",
-    "Hand the fork from one arm to the other",
-    "Put the plate on the placemat",
-    "Hold the mug with one arm while the other pours from the bottle",
+    "The brief: drawer, spoon and fork, plate on the placemat, an arm-to-arm hand-over, one arm holds the mug while the other pours",
+    "What we built: both arms carry the plate, the spoon is handed over, the mug stands on the table while the other arm pours (reach — slide 7)",
+    "Every object held by finger contact and friction only; the water is 24 beads",
     "Follow a natural-language instruction; see the scene through cameras",
     "Stay robust across 10 randomised scenes",
   ]), { x: M, y: 1.6, w: 5.6, h: 4.6 });
   s.addImage({ path: img("cover_alt.png"), x: 6.6, y: 1.6, w: 6.13, h: 3.45 });
-  s.addText("MuJoCo · 2 × SO-101 · 12 position actuators · 3 cameras · 20 Hz control", {
+  s.addText("MuJoCo · 2 × SO-101 · 12 position actuators · 5 cameras (2 on the wrists) · 20 Hz control", {
     x: 6.6, y: 5.2, w: 6.13, h: 0.4, fontFace: BODY, fontSize: 12, color: C.muted, margin: 0, isTextBox: true,
   });
   s.addNotes("This is the brief's own scenario. We built the scene from scratch: the official SO-101 model twice, a cabinet with a sliding drawer, and the table-setting props.");
@@ -163,7 +162,7 @@ function bullets(items) {
   body(s, bullets([
     "Inputs: overhead, operator and both wrist cameras (128 × 128), 12 joint positions, one-hot subtask from the planner",
     "Output: the next 20 joint-target vectors; the arm executes 10 and re-plans every second",
-    `Demonstrations: scripted contact skills on randomised seeds (${data.data.scripted_success_on_train_seeds} kept); held-out seeds 0–9 never seen in training`,
+    `Demonstrations: scripted contact skills on randomised seeds (${data.data.scripted_success_on_train_seeds}); held-out seeds 0–9 never seen in training`,
     "No object is attached to a gripper: everything is held by finger contact and friction",
   ]), { x: M, y: 3.6, w: W - 2 * M, h: 2.8 });
   s.addNotes("Training seeds start at 100 so the ten evaluation seeds stay unseen. The planner's subtask token is how language reaches the policy.");
@@ -173,7 +172,8 @@ function bullets(items) {
 {
   const s = pres.addSlide();
   s.background = { color: C.light };
-  title(s, "OpenVINO on Intel: INT8 policy in 5.9 ms");
+  const int8Row = data.latency.find((d) => d.label.startsWith("INT8")) || { ms: "?" };
+  title(s, `OpenVINO on Intel: INT8 policy in ${int8Row.ms} ms`);
   // Horizontal bar charts draw the first category at the bottom; reverse so the list reads top-down.
   const rows = [...data.latency].reverse();
   s.addChart(pres.charts.BAR, [{
@@ -202,27 +202,30 @@ function bullets(items) {
 {
   const s = pres.addSlide();
   s.background = { color: C.light };
-  title(s, "Results on 10 held-out randomised seeds");
-  const header = ["Sub-goal", "Scripted", "Learned policy", "Hybrid"].map((text) => ({
+  const n = data.eval_seeds || 10;
+  title(s, `Results on ${n} randomised seeds`);
+  const header = ["Sub-goal", "Scripted", "Learned policy", "Hybrid (policy + script)"].map((text) => ({
     text, options: { bold: true, color: C.white, fill: { color: C.dark }, fontFace: BODY, fontSize: 14 },
   }));
-  const cell = (list, i) => (list ? `${list[i]}/10` : "pending");
+  // Policy cells are counts out of n; hybrid cells are "policy-solved + assisted" strings.
+  const cell = (list, i) => (list ? (typeof list[i] === "string" ? list[i] : `${list[i]}/${n}`) : "pending");
   const rows = data.subgoals.map((name, i) => [
     { text: name, options: { fontFace: BODY, fontSize: 14, color: C.ink } },
     { text: `${data.scripted_10_seeds[i]}/10`, options: { fontFace: BODY, fontSize: 14, color: C.good, bold: true, align: "center" } },
     { text: cell(data.policy_10_seeds, i), options: { fontFace: BODY, fontSize: 14, color: C.ink, align: "center" } },
     { text: cell(data.hybrid_10_seeds, i), options: { fontFace: BODY, fontSize: 14, color: C.ink, align: "center" } },
   ]);
-  const full = (value) => (value === null || value === undefined ? "pending" : `${value}/10`);
+  const full = (value) => (value === null || value === undefined ? "pending" : `${value}/${n}`);
   const bold = { fontFace: BODY, fontSize: 14, color: C.ink, bold: true, fill: { color: C.soft } };
   rows.push([
     { text: "Full task", options: bold },
     { text: full(data.scripted_full_task), options: { ...bold, color: C.good, align: "center" } },
     { text: full(data.policy_full_task), options: { ...bold, align: "center" } },
-    { text: full(data.hybrid_full_task), options: { ...bold, align: "center" } },
+    { text: data.hybrid_full_task == null ? "pending" : `${data.hybrid_full_task}/${n} (${data.hybrid_assisted_per_episode} stages scripted per run)`,
+      options: { ...bold, align: "center" } },
   ]);
   s.addTable([header, ...rows], {
-    x: M, y: 1.6, w: 7.6, colW: [3.1, 1.5, 1.5, 1.5], rowH: 0.5,
+    x: M, y: 1.5, w: 7.9, colW: [2.9, 1.3, 1.5, 2.2], rowH: 0.44,
     border: { type: "solid", pt: 0.75, color: C.rule }, fill: { color: C.white },
   });
   if (data.failure_note) {
@@ -233,8 +236,12 @@ function bullets(items) {
   s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: 8.7, y: 1.6, w: 4.03, h: 3.64, rectRadius: 0.06, fill: { color: C.white }, line: { color: C.rule, width: 1 } });
   s.addText("Honest limits", { x: 8.95, y: 1.8, w: 3.6, h: 0.45, fontFace: HEAD, fontSize: 18, bold: true, color: C.ink, margin: 0, isTextBox: true });
   body(s, bullets([
+    "Gripper capped at the stock servo's sustainable 0.8 N·m with μ 0.8 pads (Menagerie's default is 12 V stall torque, μ 1); props are child-tableware scale",
+    "Seeds 0–9 are the seeds the scripted skills were tuned on (seed 0 unrandomised); 30 unseen seeds are reported next to them",
+    "Stage boundaries and completion are judged from simulator state, and the policy is told the current stage",
+    "The mug stands on the table during the pour — the other hand cannot steady it within reach",
     "Water is 24 small beads, not a fluid",
-    "Hybrid stages finished by a script are counted as assisted, never as policy wins",
+    "Hybrid: stages a script had to finish are counted as assisted, never as policy wins",
     "Benchmarked on Core i9 + iGPU; Core Ultra run is one command",
   ]), { x: 8.95, y: 2.35, w: 3.6, h: 2.8, fontSize: 14 });
   s.addNotes("Randomisation per seed: object positions, masses, friction, lighting and table colour.");

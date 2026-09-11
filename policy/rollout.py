@@ -28,13 +28,20 @@ ROOT = Path(__file__).resolve().parent.parent
 STAGE_TIMEOUT_S = 40.0  # the longest contact stage (hand-over) takes ~25 s scripted
 HOME_SECONDS = 2.0
 LIFTED_ABOVE_TABLE = 0.06
+CONFIRM_SECONDS = 1.0
+
+
+def is_scored(stage):
+    """``home`` stages have no physical outcome and are never counted as policy successes."""
+    return any(sub["skill"] != "home" for sub in stage)
 
 
 def stage_done(env, stage, elapsed_s):
     """Success predicate for one plan stage, read from the physical state.
 
-    Holding is contact-based: an object counts as held by an arm only while both of that
-    arm's jaws touch it (``env.holder``).
+    This is an oracle: the evaluator, not the policy, decides when a stage is complete,
+    using simulator state (contacts, poses, bead counts). Holding is contact-based: an
+    object counts as held by an arm only while both of that arm's jaws touch it.
     """
     result = env.success()
     lifted = TABLE_TOP_Z + LIFTED_ABOVE_TABLE
@@ -51,15 +58,16 @@ def stage_done(env, stage, elapsed_s):
         elif skill == "pour":
             checks.append(result["poured"])
         elif skill == "return":
-            checks.append(env.holder(obj) is None and env.object_frame(obj)[0][2] < TABLE_TOP_Z + 0.005
-                          and env.tilt_deg(obj) < UPRIGHT_TOL_DEG)
+            checks.append(result["bottle_returned"] if obj == "bottle" else result.get(f"{obj}_placed", False))
         elif skill == "home":
             checks.append(elapsed_s >= HOME_SECONDS)
     return all(checks)
 
 
 def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None):
-    """Drive one stage with the policy; return True if its predicate was met before the timeout."""
+    """Drive one stage with the policy; True if its predicate holds, and still holds after
+    the arms have been held still for CONFIRM_SECONDS (so a bead splash or a plate that is
+    about to tip over does not count)."""
     onehot = subtask_onehot(stage_index_in_vocab)
     policy.reset()
     steps = int(STAGE_TIMEOUT_S * 20 / RECORD_EVERY)
@@ -70,8 +78,11 @@ def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None):
             env.step(action)
         if frames is not None:
             frames.append(env.render("operator"))
-        if stage_done(env, stage, (k + 1) * RECORD_EVERY / 20):
-            return True
+        elapsed = (k + 1) * RECORD_EVERY / 20
+        if stage_done(env, stage, elapsed):
+            env.hold(CONFIRM_SECONDS)
+            if stage_done(env, stage, elapsed + CONFIRM_SECONDS):
+                return True
     return False
 
 
@@ -89,6 +100,7 @@ def evaluate(policy, seeds, plan, mode, video_frames=None):
         env.reset(seed)
         executor.reset()
         stages = []
+        clean = True  # every earlier scored stage solved by the policy itself
         for stage in plan:
             signature = stage_signature(stage)
             if signature not in SUBTASK_VOCAB:
@@ -98,11 +110,18 @@ def evaluate(policy, seeds, plan, mode, video_frames=None):
             if not ok and mode == "hybrid":
                 run_stage_scripted(env, executor, stage)
                 assisted = True
-            stages.append({"stage": signature, "policy_ok": ok, "assisted": assisted})
+            scored = is_scored(stage)
+            # "policy_ok" is only meaningful if the stage started from a state the policy earned.
+            stages.append({"stage": signature, "scored": scored, "policy_ok": ok and scored,
+                           "policy_ok_from_clean_state": ok and scored and clean, "assisted": assisted})
+            if scored and not ok:
+                clean = False
+        env.hold(CONFIRM_SECONDS)
         result = env.success()
         per_seed.append({"seed": seed, "success": result, "stages": stages})
-        policy_stages = sum(s["policy_ok"] for s in stages)
-        print(f"seed {seed}: all={result['all']} policy-solved stages {policy_stages}/{len(stages)} "
+        scored_stages = [s for s in stages if s["scored"]]
+        policy_stages = sum(s["policy_ok"] for s in scored_stages)
+        print(f"seed {seed}: all={result['all']} policy-solved stages {policy_stages}/{len(scored_stages)} "
               f"assisted={[s['stage'] for s in stages if s['assisted']]}")
     env.close()
     return per_seed
@@ -117,9 +136,11 @@ def evaluate_stagewise(policy, seeds, plan):
     env = DinnerTableEnv(obs_cameras=())
     executor = Executor(env)
     names = [stage_signature(stage) for stage in plan]
-    wins = {name: 0 for name in names}
+    wins = {name: 0 for name in names if is_scored(plan[names.index(name)])}
     for seed in seeds:
         for index, stage in enumerate(plan):
+            if not is_scored(stage):
+                continue
             env.reset(seed)
             executor.reset()
             executor.run(plan[:index])
@@ -129,18 +150,23 @@ def evaluate_stagewise(policy, seeds, plan):
             wins[names[index]] += ok
         print(f"seed {seed}: cumulative per-stage wins {wins}")
     env.close()
-    return {name: wins[name] / len(seeds) for name in names}
+    return {name: wins[name] / len(seeds) for name in wins}
 
 
 def summarise(per_seed, policy):
     keys = [k for k in per_seed[0]["success"] if k != "all"]
-    stage_names = [s["stage"] for s in per_seed[0]["stages"]]
+    scored = [i for i, s in enumerate(per_seed[0]["stages"]) if s["scored"]]
+    names = {i: per_seed[0]["stages"][i]["stage"] for i in scored}
     return {
         "task_success_rate": float(np.mean([r["success"]["all"] for r in per_seed])),
         "subgoal_success": {k: float(np.mean([r["success"][k] for r in per_seed])) for k in keys},
-        "policy_stage_success": {name: float(np.mean([r["stages"][i]["policy_ok"] for r in per_seed]))
-                                 for i, name in enumerate(stage_names)},
+        "policy_stage_success": {names[i]: float(np.mean([r["stages"][i]["policy_ok"] for r in per_seed]))
+                                 for i in scored},
+        "policy_stage_success_from_clean_state": {
+            names[i]: float(np.mean([r["stages"][i]["policy_ok_from_clean_state"] for r in per_seed])) for i in scored},
+        "assisted_stages": {names[i]: int(sum(r["stages"][i]["assisted"] for r in per_seed)) for i in scored},
         "assisted_stages_per_episode": float(np.mean([sum(s["assisted"] for s in r["stages"]) for r in per_seed])),
+        "episodes": len(per_seed),
         "policy_device": policy.device,
         "policy_infer_ms_mean": round(float(np.mean(policy.infer_ms)), 3) if policy.infer_ms else None,
         "policy_compile_s": round(policy.compile_s, 2),

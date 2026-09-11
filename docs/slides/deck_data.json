@@ -41,9 +41,11 @@
     "Plate on placemat",
     "Fork placed",
     "Spoon handed over + placed",
-    "Poured (≥ 60 % of the water)"
+    "Poured (≥ 60 % of the water)",
+    "Bottle put back"
   ],
   "scripted_10_seeds": [
+    10,
     10,
     10,
     10,
@@ -57,5 +59,7 @@
   "policy_full_task": null,
   "hybrid_full_task": null,
   "failure_note": null,
-  "hardware_note": "Measured on Intel Core i9-14900HX + Raptor Lake iGPU; bench/benchmark.py reproduces every number on a Core Ultra in one command."
+  "hardware_note": "Measured on Intel Core i9-14900HX + Raptor Lake iGPU; bench/benchmark.py reproduces every number on a Core Ultra in one command.",
+  "eval_seeds": 10,
+  "hybrid_assisted_per_episode": null
 }

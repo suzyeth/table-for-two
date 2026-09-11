@@ -29,9 +29,10 @@ POLICY_DIR = ROOT / "models" / "policy"
 OUT_DIR = ROOT / "out"
 
 INSTRUCTIONS = [
-    "Open the drawer, put the mug in its place and the plate on the placemat, lay the fork, pour the "
-    "water from the bottle into the mug, then hand the spoon from the left arm to the right arm.",
-    "Put the plate on the placemat.",
+    "Carry the plate to the placemat with both hands, open the drawer and put the mug in its place, lay "
+    "the fork, pour the water from the bottle into the mug, then hand the spoon from the left arm to the "
+    "right arm.",
+    "Carry the plate to the placemat with both hands.",
     "Take the fork out of the drawer and set it on the table.",
     "Set the cup down and pour some water into it.",
     "Pass the spoon from the left hand to the right hand and set it down.",
@@ -163,12 +164,15 @@ def main():
         report["notes"].append("Host CPU is not an Intel Core Ultra; numbers are from "
                                f"{names.get('CPU')} and its integrated GPU. Re-run this script on a Core Ultra "
                                "Series 2/3 machine to reproduce the target-hardware figures.")
+    if not args.skip_planner and not MODEL_DIR.exists():
+        raise SystemExit(f"planner model not found at {MODEL_DIR}; run: python -m planner.download_model "
+                         "(or pass --skip-planner)")
     for device in devices:
         if not args.skip_planner:
             print(f"planner on {device} ...")
             try:
                 report["planner"].append(bench_planner(device))
-            except RuntimeError as exc:
+            except (RuntimeError, FileNotFoundError) as exc:
                 report["notes"].append(f"planner on {device} failed: {exc}")
         for xml_path in sorted(policy_dir.glob("*.xml")):
             print(f"policy {xml_path.stem} on {device} ...")

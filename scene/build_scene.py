@@ -52,6 +52,12 @@ DRAWER_RGBA = [0.75, 0.6, 0.45, 1.0]
 STEEL = [0.72, 0.73, 0.78, 1.0]
 CERAMIC = [0.95, 0.95, 0.95, 1.0]
 PROP_FRICTION = [1.0, 0.005, 0.0001]
+# Gripper: sustained torque of a 7.4 V STS3215 (stall 1.62 N m; ~half of that without tripping
+# its overload protection) and rubber finger pads (mu ~0.8 on ceramic/plastic). The pads'
+# friction is what every finger-object contact uses (the pad geoms have contact priority), and
+# sim/env.py scales it per seed.
+GRIPPER_TORQUE = 0.8
+PAD_FRICTION = [0.8, 0.005, 0.0005]
 
 # Cabinet on the left-front, drawer sliding toward the arms (-x). The drawer handle is a
 # bar on stand-offs, pinched top-down with one finger between bar and drawer front.
@@ -65,7 +71,8 @@ HANDLE = {"bar_half": (0.004, 0.030, 0.004), "standoff": 0.028}
 # Shell containers: outer radius, height, wall thickness, mass, segments.
 # 4.8 cm across (espresso-cup size): still inside the jaws' reach, and a wider target for the pour.
 MUG = {"pos": (0.00, -0.15), "radius": 0.024, "height": 0.060, "wall": 0.0025, "mass": 0.12, "rgba": [0.2, 0.45, 0.8, 1]}
-BOTTLE = {"pos": (0.12, -0.22), "radius": 0.016, "height": 0.070, "wall": 0.002, "mass": 0.10, "rgba": [0.3, 0.75, 0.4, 0.85]}
+# 32 mm x 70 mm glass vial: ~40 g empty, plus 6.5 g of bead water.
+BOTTLE = {"pos": (0.12, -0.22), "radius": 0.016, "height": 0.070, "wall": 0.002, "mass": 0.04, "rgba": [0.3, 0.75, 0.4, 0.85]}
 SHELL_SEGMENTS = 16
 # 8 mm container bases (like real cups and bottles). With 5 mm bases, beads landing on
 # beads drove the lowest ones more than half-way into the disc, where the contact pushes
@@ -256,12 +263,31 @@ def add_cameras(spec):
         spec.worldbody.add_camera(name=name, pos=list(pos), mode=track, targetbody="workspace_center", fovy=55)
 
 
+def realistic_gripper(spec, prefix, pad_friction=None):
+    """Cap the gripper servo and give the fingers stated pads, on an already attached arm.
+
+    The Menagerie file models the optional 12 V gripper servo at stall (2.94 N m, ~37 N at the
+    fingertip) and hard fingers with mu = 1. A stock SO-101 has the 7.4 V STS3215 (1.62 N m
+    stall) whose overload protection cuts the current after a few seconds, so grasps run on
+    what it can sustain, and the printed fingers get soft pads with a stated friction.
+    """
+    mu = PAD_FRICTION[0] if pad_friction is None else pad_friction
+    for actuator in spec.actuators:
+        if actuator.name == prefix + "gripper":
+            actuator.forcerange = [-GRIPPER_TORQUE, GRIPPER_TORQUE]
+    finger_bodies = {prefix + "gripper", prefix + "moving_jaw_so101_v1"}
+    for geom in spec.geoms:  # pad boxes, tip spheres, finger hulls and the gripper housing
+        if geom.parent and geom.parent.name in finger_bodies and (geom.contype or geom.conaffinity):
+            geom.friction = [mu, *PAD_FRICTION[1:]]
+
+
 def attach_arm(world_spec, prefix, xy):
     arm = mujoco.MjSpec.from_file(str(ARM_XML))
     arm.meshdir = str(ASSETS_DIR)
     frame = world_spec.worldbody.add_frame(pos=[xy[0], xy[1], TABLE_TOP_Z])
     with contextlib.redirect_stderr(io.StringIO()):
         world_spec.attach(arm, prefix=prefix, frame=frame)
+    realistic_gripper(world_spec, prefix)
 
 
 def build_spec():

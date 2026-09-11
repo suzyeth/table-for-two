@@ -1,8 +1,8 @@
-"""End-to-end demo: instruction (typed or spoken) -> OpenVINO planner -> bimanual execution -> annotated video.
+"""Full-pipeline demo: instruction (typed or spoken) -> OpenVINO planner -> bimanual execution -> annotated video.
 
 Examples:
   .venv\\Scripts\\python.exe demo.py --seed 3
-  .venv\\Scripts\\python.exe demo.py --text "Hold the cup with the right arm and pour with the left arm"
+  .venv\\Scripts\\python.exe demo.py --text "Carry the plate with both hands, pour a drink and pass the spoon to the right arm"
   .venv\\Scripts\\python.exe demo.py --audio recordings\\set_table.wav --executor policy
 
 Writes an MP4 (operator view with an overhead inset, the instruction, the

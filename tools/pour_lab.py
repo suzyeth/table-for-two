@@ -27,6 +27,7 @@ import mujoco
 import numpy as np
 from PIL import Image, ImageDraw
 
+from scene.build_scene import realistic_gripper
 from sim.ik import ArmIK
 from tools.grasp_lab import FIXED_PAD_X, JOINTS, OPEN, PREFIX, ROOT, SITE_LOCAL, SO101, SQUEEZE, UP, add_shell_body, \
     arm_collision
@@ -34,7 +35,7 @@ from tools.grasp_lab import FIXED_PAD_X, JOINTS, OPEN, PREFIX, ROOT, SITE_LOCAL,
 # A jaws-horizontal side grip near the table is only reachable with the arm stretched out
 # (pinch point >= ~0.30 m from the base at 2-5 cm height), so the bottle stands at the far
 # edge of the arm's workspace; the pour itself happens 11-20 cm up, reachable from ~0.22 m.
-BOTTLE = {"xy": (0.30, -0.08), "radius": 0.016, "height": 0.070, "wall": 0.002, "mass": 0.10}
+BOTTLE = {"xy": (0.30, -0.08), "radius": 0.016, "height": 0.070, "wall": 0.002, "mass": 0.04}
 MUG = {"xy": (0.26, 0.09), "radius": 0.028, "height": 0.070, "wall": 0.0025, "mass": 0.15}
 BEADS = {"count": 24, "radius": 0.004, "mass": 0.00027}
 
@@ -85,6 +86,7 @@ def build(bottle_friction):
                       friction=[0.3, 0.001, 0.0001], condim=3, solref=[0.004, 1.0], rgba=[0.35, 0.6, 1.0, 1])
     with contextlib.redirect_stderr(io.StringIO()):
         spec.attach(arm, prefix=PREFIX, frame=spec.worldbody.add_frame(pos=[0, 0, 0]))
+        realistic_gripper(spec, PREFIX, pad_friction=bottle_friction)  # the sweep sets the pads
         return spec.compile()
 
 

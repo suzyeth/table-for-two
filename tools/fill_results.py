@@ -15,10 +15,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DECK_DATA = ROOT / "docs" / "slides" / "deck_data.json"
-# Plan order of the contact task (sim/task.py DEFAULT_PLAN); deck_data.json lists use the same order.
-SUBGOAL_KEYS = ["drawer_open", "mug_placed", "plate_placed", "fork_placed", "spoon_placed", "poured"]
+# Order of env.success() sub-goals as shown in README and deck_data.json (not plan order).
+SUBGOAL_KEYS = ["drawer_open", "mug_placed", "plate_placed", "fork_placed", "spoon_placed", "poured",
+                "bottle_returned"]
 SUBGOAL_NAMES = ["Drawer opened", "Mug placed", "Plate on placemat", "Fork placed", "Spoon handed over + placed",
-                 "Poured (≥ 60 % of the water)"]
+                 "Poured (≥ 60 % of the water)", "Bottle put back"]
+# Which plan stage produces each sub-goal (for the hybrid "policy-solved + assisted" cells).
+SUBGOAL_STAGE = {"drawer_open": "open_drawer", "mug_placed": "pick_place:mug", "plate_placed": "bimanual_place:plate",
+                 "fork_placed": "pick_place:fork", "spoon_placed": "handoff:spoon", "poured": "pour:mug",
+                 "bottle_returned": "return:bottle"}
 
 
 def load(path):
@@ -35,6 +40,26 @@ def counts(report):
     return [round(fractions[key] * seeds) for key in SUBGOAL_KEYS], seeds
 
 
+def hybrid_cells(report):
+    """Per sub-goal: 'policy-solved + assisted' counts of the stage that produces it.
+
+    A hybrid run's sub-goal success is mostly the script's work, so the deck shows how
+    many episodes the policy solved that stage itself and how many the script finished.
+    """
+    if not report:
+        return None
+    cells = []
+    for key in SUBGOAL_KEYS:
+        solved = assisted = 0
+        for episode in report["episodes"]:
+            stage = next((s for s in episode["stages"] if SUBGOAL_STAGE[key] in s["stage"]), None)
+            if stage:
+                solved += bool(stage["policy_ok"])
+                assisted += bool(stage["assisted"])
+        cells.append(f"{solved} + {assisted} assisted")
+    return cells
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fill slide data and print README tables from evaluation JSON.")
     parser.add_argument("--int8-dir", default="models/policy", help="export directory whose INT8 error to report")
@@ -47,11 +72,14 @@ def main():
 
     deck = json.loads(DECK_DATA.read_text(encoding="utf-8"))
     policy_counts, seeds = counts(policy)
-    hybrid_counts, _ = counts(hybrid)
+    hybrid_counts = hybrid_cells(hybrid)
     deck["policy_10_seeds"] = policy_counts
     deck["hybrid_10_seeds"] = hybrid_counts
+    deck["eval_seeds"] = seeds
     for key, report in (("policy_full_task", policy), ("hybrid_full_task", hybrid)):
         deck[key] = round(report["summary"]["task_success_rate"] * len(report["seeds"])) if report else None
+    if hybrid:
+        deck["hybrid_assisted_per_episode"] = round(hybrid["summary"]["assisted_stages_per_episode"], 1)
     if export:
         deck["int8_action_error_rad"] = export["act_int8"]["mean_abs_action_error_rad"]
     DECK_DATA.write_text(json.dumps(deck, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -61,7 +89,7 @@ def main():
     print("\n| Sub-goal | Scripted | Learned policy | Hybrid |\n|---|---|---|---|")
     for i, name in enumerate(SUBGOAL_NAMES):
         pol = f"{policy_counts[i]}/{denominator}" if policy_counts else "—"
-        hyb = f"{hybrid_counts[i]}/{denominator}" if hybrid_counts else "—"
+        hyb = hybrid_counts[i] if hybrid_counts else "—"
         print(f"| {name} | {deck['scripted_10_seeds'][i]}/10 | {pol} | {hyb} |")
     for label, report in (("Learned policy", policy), ("Hybrid", hybrid)):
         if report:
