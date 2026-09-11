@@ -158,11 +158,12 @@ def candidates(name, obj_pos, base_pos):
         # so the fixed pad is outside the wall and the moving jaw presses from inside.
         wall_mid = PLATE["radius"] - PLATE["wall"] / 2
         wall_top = obj_pos[2] + PLATE["height"]
+        # Same numbers as sim/grasping.py: moving jaw ~3 mm above the 8 mm floor.
         for yaw in (0, 15, -15):
             toward_centre = _rotate_z(radial, yaw)
-            point = np.array([obj_pos[0], obj_pos[1], wall_top - 0.006]) - toward_centre * wall_mid
+            point = np.array([obj_pos[0], obj_pos[1], wall_top - 0.004]) - toward_centre * wall_mid
             specs.append(GraspSpec(f"plate wall top-down yaw {yaw:+d}", tuple(point), tuple(-UP),
-                                   tuple(toward_centre), PLATE["wall"] / 2, 0.006))
+                                   tuple(toward_centre), PLATE["wall"] / 2, -0.003))
     elif name == "spoon":
         # Fingertips stop ~1 mm above the table beside the 6 mm-thick handle.
         specs.append(GraspSpec("spoon top-down", tuple(obj_pos), tuple(-UP), (1, 0, 0), 0.006, 0.0015))

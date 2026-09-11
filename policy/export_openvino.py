@@ -41,8 +41,9 @@ class ACTCore(torch.nn.Module):
         super().__init__()
         self.model = policy.model
 
-    def forward(self, state, env_state, image_a, image_b):
-        batch = {OBS_STATE: state, OBS_ENV_STATE: env_state, OBS_IMAGES: [image_a, image_b]}
+    def forward(self, state, env_state, *images):
+        """One image tensor per camera, in the checkpoint's ``image_features`` order."""
+        batch = {OBS_STATE: state, OBS_ENV_STATE: env_state, OBS_IMAGES: list(images)}
         return self.model(batch)[0]
 
 
@@ -74,8 +75,8 @@ def main():
     policy = ACTPolicy.from_pretrained(str(args.checkpoint))
     policy.to("cpu").eval()
     image_keys = list(policy.config.image_features)
-    if len(image_keys) != 2:
-        raise SystemExit(f"export expects two cameras, checkpoint has {image_keys}")
+    if not image_keys:
+        raise SystemExit("checkpoint has no camera inputs")
     core_model = ACTCore(policy).eval()
 
     dataset = LeRobotDataset(REPO_ID, root=args.dataset_root)

@@ -22,9 +22,11 @@ from sim.env import ARMS, JOINTS, DinnerTableEnv
 from sim.task import DEFAULT_INSTRUCTION, DEFAULT_PLAN, Executor
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_ROOT = ROOT / "data" / "dinner_table"
-REPO_ID = "local/bimanual_dinner_table"
-CAMERAS = ("overhead", "operator")
+DATA_ROOT = ROOT / "data" / "dinner_table_contact"
+REPO_ID = "local/bimanual_dinner_table_contact"
+# Two scene views plus a camera on each wrist: with contact-only grasps the policy has to
+# see how the jaws sit on the object, which the scene cameras barely resolve.
+CAMERAS = ("overhead", "operator", "left_wrist_cam", "right_wrist_cam")
 IMAGE_SIZE = (128, 128)
 RECORD_EVERY = 2  # 20 Hz control loop -> 10 Hz dataset
 FPS = 10

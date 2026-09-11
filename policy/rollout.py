@@ -21,48 +21,38 @@ import numpy as np
 from data.record import CAMERAS, IMAGE_SIZE, RECORD_EVERY, SUBTASK_VOCAB, stage_signature, subtask_onehot
 from policy.export_openvino import DEFAULT_CKPT
 from policy.ov_policy import OVActPolicy
-from sim.env import ARMS, TABLE_TOP_Z, DinnerTableEnv
+from sim.env import ARMS, TABLE_TOP_Z, UPRIGHT_TOL_DEG, DinnerTableEnv
 from sim.task import ARM_KEY, DEFAULT_PLAN, Executor
 
 ROOT = Path(__file__).resolve().parent.parent
-STAGE_TIMEOUT_S = 25.0
+STAGE_TIMEOUT_S = 40.0  # the longest contact stage (hand-over) takes ~25 s scripted
 HOME_SECONDS = 2.0
-
-
-def stage_arm_objects(stage):
-    """arm prefix -> object that arm is expected to grasp in this stage (for grasp intent)."""
-    intents = {}
-    for sub in stage:
-        if sub["skill"] == "handoff":
-            intents[ARM_KEY[sub["giver"]]] = sub["object"]
-            intents[ARM_KEY[sub["receiver"]]] = sub["object"]
-        elif sub["skill"] == "open_drawer":
-            intents[ARM_KEY[sub["arm"]]] = "drawer"
-        elif sub.get("object"):
-            intents[ARM_KEY[sub["arm"]]] = sub["object"]
-    return intents
+LIFTED_ABOVE_TABLE = 0.06
 
 
 def stage_done(env, stage, elapsed_s):
-    """Success predicate for one plan stage."""
+    """Success predicate for one plan stage, read from the physical state.
+
+    Holding is contact-based: an object counts as held by an arm only while both of that
+    arm's jaws touch it (``env.holder``).
+    """
     result = env.success()
-    lifted = TABLE_TOP_Z + 0.06
+    lifted = TABLE_TOP_Z + LIFTED_ABOVE_TABLE
     checks = []
     for sub in stage:
         skill, obj = sub["skill"], sub.get("object")
         if skill == "open_drawer":
-            checks.append(env.drawer_max > 0.05 and "drawer" not in env.held.values())
-        elif skill in ("pick_place", "handoff"):
+            checks.append(result["drawer_open"] and env.holder("drawer") is None)
+        elif skill in ("pick_place", "handoff", "place"):
             checks.append(result[f"{obj}_placed"])
         elif skill in ("pick_hold", "pick_lift"):
             arm = ARM_KEY[sub["arm"]]
-            checks.append(env.held[arm] == obj and env.grasp_point(obj)[2] > lifted)
+            checks.append(env.holder(obj) == arm and env.object_frame(obj)[0][2] > lifted)
         elif skill == "pour":
             checks.append(result["poured"])
-        elif skill == "place":
-            checks.append(result[f"{obj}_placed"])
         elif skill == "return":
-            checks.append(obj not in env.held.values() and env.grasp_point(obj)[2] < lifted)
+            checks.append(env.holder(obj) is None and env.object_frame(obj)[0][2] < TABLE_TOP_Z + 0.005
+                          and env.tilt_deg(obj) < UPRIGHT_TOL_DEG)
         elif skill == "home":
             checks.append(elapsed_s >= HOME_SECONDS)
     return all(checks)
@@ -70,8 +60,6 @@ def stage_done(env, stage, elapsed_s):
 
 def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None):
     """Drive one stage with the policy; return True if its predicate was met before the timeout."""
-    for arm, obj in stage_arm_objects(stage).items():
-        env.set_grasp_intent(arm, obj)
     onehot = subtask_onehot(stage_index_in_vocab)
     policy.reset()
     steps = int(STAGE_TIMEOUT_S * 20 / RECORD_EVERY)

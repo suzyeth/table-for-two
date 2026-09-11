@@ -30,6 +30,8 @@ UTENSIL_CLEARANCE = 0.002
 # (5 mm up) puts the lowest jaw point 1 mm above the surface and the pads over 5-7 mm of
 # the 10 mm handle.
 UTENSIL_OVERLAP = -0.004
+PLATE_PINCH_BELOW_TOP = 0.004
+PLATE_OVERLAP = -0.003
 UTENSIL_NEIGHBOUR = 0.05  # closer than this, the other utensil decides which way the jaws face
 SITE_LOCAL = np.array([0.012, -0.000218, -0.098127])
 UP = np.array([0.0, 0.0, 1.0])
@@ -103,10 +105,14 @@ def top_down_grasp(env, arm, obj, along=0.0, toward=None):
         return Grasp(centre, horizontal(rot[:, 0]), pinch_point(MUG["radius"], 0.010), True)
     if obj == "plate":
         # Pinch the wall nearest the arm, fixed pad outside and moving jaw inside the plate.
+        # The moving jaw reaches 8.1 mm + overlap below the pinch point, and the plate floor
+        # is 8 mm thick: pinching 16 mm up the 20 mm wall with the pinch 3 mm below the TCP
+        # keeps the jaw ~3 mm off the floor (a jaw that jams on the floor never closes) while
+        # the pads still cover 6.5-7 mm of wall.
         toward_centre = horizontal(origin - env.arm_base(arm))
         wall_mid = PLATE["radius"] - PLATE["wall"] / 2
-        centre = origin + UP * (PLATE["height"] - 0.006) - toward_centre * wall_mid
-        return Grasp(centre, toward_centre, pinch_point(PLATE["wall"] / 2, 0.006), False)
+        centre = origin + UP * (PLATE["height"] - PLATE_PINCH_BELOW_TOP) - toward_centre * wall_mid
+        return Grasp(centre, toward_centre, pinch_point(PLATE["wall"] / 2, PLATE_OVERLAP), False)
     if obj == "drawer":
         # Fixed finger on the arm side of the bar, moving jaw dropped into the gap between
         # bar and drawer front (opened only part way so it fits): pulling toward the arms

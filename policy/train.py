@@ -4,9 +4,10 @@ Reproducible wrapper around LeRobot's training script with the settings used
 for the submission. The dataset is the local LeRobot dataset written by
 ``data/record.py``; nothing is downloaded from or pushed to the Hugging Face Hub.
 
-Policy inputs: two 128x128 camera views, the 12-D joint state and the one-hot
-subtask from the planner (``observation.environment_state``). Output: a chunk
-of future 12-D joint targets at 10 Hz.
+Policy inputs: four 128x128 camera views (overhead, operator and one on each
+wrist), the 12-D joint state and the one-hot subtask from the planner
+(``observation.environment_state``). Output: a chunk of future 12-D joint
+targets at 10 Hz.
 
 Windows note: LeRobot marks the newest checkpoint with a ``last`` symlink,
 which Windows refuses without Developer Mode. Training therefore runs
@@ -21,7 +22,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-OUTPUT_DIR = ROOT / "outputs" / "act_dinner_table"
+OUTPUT_DIR = ROOT / "outputs" / "act_contact"  # contact-physics policy (v1/v2 weld-era runs keep their own dirs)
 POINTER_FILE = "last_checkpoint.txt"
 
 CHUNK_SIZE = 20  # 2 s of actions at 10 Hz
@@ -55,7 +56,7 @@ def build_args(args):
         f"--policy.chunk_size={CHUNK_SIZE}",
         f"--policy.n_action_steps={N_ACTION_STEPS}",
         f"--output_dir={args.output_dir}",
-        "--job_name=act_dinner_table",
+        "--job_name=act_contact",
         f"--steps={args.steps}",
         f"--batch_size={args.batch_size}",
         f"--num_workers={args.num_workers}",
