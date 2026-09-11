@@ -105,6 +105,19 @@ network will be filled in here from `policy/rollout.py` and `bench/benchmark.py`
 
 ## Honest notes
 
+- **The mug stands on the table while it is poured into; the other hand does not
+  steady it.** The brief's scene has one hand hold the cup while the other pours.
+  With two SO-101s a full pour is only reachable by rolling the bottle sideways
+  toward the other arm, which puts the steadying hand beside the mug's rim. We
+  searched 12 mug positions × pour directions × steadying grips (body side-grip,
+  handle pinch; 6 cm and 9 cm mugs), measuring the distance between the arms'
+  collision bodies over every pour pose: the best layout left 3 mm, most
+  overlapped, and with a 9 cm mug no position allowed a full pour at all. So the
+  bimanual coordination is shown instead by the two-handed plate carry and the
+  spoon hand-over.
+- **The hand-over holds the spoon off its balance point** (each hand 2.8 cm from
+  the handle centre, the only collision-free layout found), so the spoon sags
+  10–13° in the hands; it is still set down by touch.
 - **Water is 24 beads**, not a fluid: each is a 4 mm sphere of 0.27 g. Container
   bases are 8 mm thick; with 5 mm bases the beads tunnelled through the disc.
 - **Hardware.** The challenge targets Intel Core Ultra Series 2/3. This build

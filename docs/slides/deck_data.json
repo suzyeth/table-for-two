@@ -6,11 +6,11 @@
     "model": "Qwen2.5-1.5B-Instruct INT4 (OpenVINO GenAI)",
     "cpu_latency_s": 2.12,
     "igpu_latency_s": 2.22,
-    "unit_tests": 19
+    "unit_tests": 21
   },
   "data": {
     "episodes": 150,
-    "frames": 114750,
+    "frames": 115039,
     "fps": 10,
     "train_steps": 40000,
     "scripted_success_on_train_seeds": "pending"
