@@ -160,7 +160,7 @@ def closing_card(data):
                                outline=ACCENT if "ACT" in step else (70, 80, 76), width=3)
         for i, line in enumerate(textwrap.wrap(step, 16)):
             draw.text((x + 16, 225 + 32 * i), line, font=font(24, bold=True), fill=(240, 240, 240))
-    draw.text((48, 420), "Grasps are constraint-assisted; hybrid stages are reported separately from policy wins.",
+    draw.text((48, 420), "Grasps are finger contact only; hybrid stages are reported separately from policy wins.",
               font=font(24), fill=(200, 208, 205))
     draw.text((48, 600), f"{data['title']} · everything shown is reproducible from the repository",
               font=font(24), fill=ACCENT)

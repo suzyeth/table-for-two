@@ -80,9 +80,9 @@ function bullets(items) {
   const stages = [
     ["Speech or text", "Speechmatics transcribes a spoken instruction"],
     ["Planner", "Qwen2.5-1.5B INT4 on OpenVINO GenAI writes a checked plan"],
-    ["Stage executor", "Subtask token and grasp intent for each stage"],
-    ["ACT policy", "2 cameras + 12 joints → 12 joint targets at 10 Hz, OpenVINO INT8"],
-    ["MuJoCo", "Dual SO-101 arms, drawer, plate, mug, bottle, utensils"],
+    ["Stage executor", "Subtask token for each stage; both arms run in parallel"],
+    ["ACT policy", "4 cameras (2 scene + 2 wrist) + 12 joints → 12 joint targets at 10 Hz, OpenVINO INT8"],
+    ["MuJoCo", "Dual SO-101 arms, contact-only grasps, drawer, plate, mug, bead water, utensils"],
   ];
   const boxW = 2.2;
   const boxY = 2.2;
@@ -114,11 +114,13 @@ function bullets(items) {
   title(s, "A planner that cannot hand the robot a bad plan");
   s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: M, y: 1.6, w: 5.9, h: 3.1, rectRadius: 0.06, fill: { color: C.dark }, line: { color: C.dark } });
   s.addText([
-    { text: "\"Hold the cup with the right arm and pour with the left.\"", options: { color: C.accent, breakLine: true } },
+    { text: "\"Pour a drink, then pass the spoon from the left arm to the right.\"", options: { color: C.accent, breakLine: true } },
     { text: " ", options: { breakLine: true } },
-    { text: "pick_hold right mug ; pick_lift left bottle", options: { breakLine: true } },
-    { text: "pour left mug", options: { breakLine: true } },
-    { text: "return left bottle ; place right mug", options: { breakLine: true } },
+    { text: "open_drawer left ; pick_place right mug", options: { breakLine: true } },
+    { text: "pick_lift right bottle", options: { breakLine: true } },
+    { text: "pour right mug", options: { breakLine: true } },
+    { text: "return right bottle", options: { breakLine: true } },
+    { text: "handoff spoon left right", options: { breakLine: true } },
     { text: "home left ; home right" },
   ], { x: M + 0.3, y: 1.85, w: 5.4, h: 2.7, fontFace: "Courier New", fontSize: 14, color: "E4E9E7", margin: 0, valign: "top", isTextBox: true });
   s.addText("The model writes the compact plan; the parser turns it into the JSON the executor runs.", {
@@ -159,10 +161,10 @@ function bullets(items) {
     s.addText(small, { x, y: 2.6, w: 2.9, h: 0.4, fontFace: BODY, fontSize: 14, color: C.muted, margin: 0, isTextBox: true });
   });
   body(s, bullets([
-    "Inputs: overhead + operator camera (128 × 128), 12 joint positions, one-hot subtask from the planner",
+    "Inputs: overhead, operator and both wrist cameras (128 × 128), 12 joint positions, one-hot subtask from the planner",
     "Output: the next 20 joint-target vectors; the arm executes 10 and re-plans every second",
-    `Demonstrations: scripted IK skills on randomised seeds (${data.data.scripted_success_on_train_seeds} kept); held-out seeds 0–9 never seen in training`,
-    "Grasping is constraint-assisted: a closing gripper attaches the object it was sent for",
+    `Demonstrations: scripted contact skills on randomised seeds (${data.data.scripted_success_on_train_seeds} kept); held-out seeds 0–9 never seen in training`,
+    "No object is attached to a gripper: everything is held by finger contact and friction",
   ]), { x: M, y: 3.6, w: W - 2 * M, h: 2.8 });
   s.addNotes("Training seeds start at 100 so the ten evaluation seeds stay unseen. The planner's subtask token is how language reaches the policy.");
 }
@@ -215,7 +217,7 @@ function bullets(items) {
   const bold = { fontFace: BODY, fontSize: 14, color: C.ink, bold: true, fill: { color: C.soft } };
   rows.push([
     { text: "Full task", options: bold },
-    { text: "10/10", options: { ...bold, color: C.good, align: "center" } },
+    { text: full(data.scripted_full_task), options: { ...bold, color: C.good, align: "center" } },
     { text: full(data.policy_full_task), options: { ...bold, align: "center" } },
     { text: full(data.hybrid_full_task), options: { ...bold, align: "center" } },
   ]);
@@ -231,7 +233,7 @@ function bullets(items) {
   s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: 8.7, y: 1.6, w: 4.03, h: 3.64, rectRadius: 0.06, fill: { color: C.white }, line: { color: C.rule, width: 1 } });
   s.addText("Honest limits", { x: 8.95, y: 1.8, w: 3.6, h: 0.45, fontFace: HEAD, fontSize: 18, bold: true, color: C.ink, margin: 0, isTextBox: true });
   body(s, bullets([
-    "Grasps are constraint-assisted, not finger-contact",
+    "Water is 24 small beads, not a fluid",
     "Hybrid stages finished by a script are counted as assisted, never as policy wins",
     "Benchmarked on Core i9 + iGPU; Core Ultra run is one command",
   ]), { x: 8.95, y: 2.35, w: 3.6, h: 2.8, fontSize: 14 });
@@ -244,7 +246,7 @@ function bullets(items) {
   s.background = { color: C.dark };
   title(s, "What's next", { color: C.white });
   const next = [
-    ["Contact-rich grasping", "Replace the attach constraint with finger contact and train on it"],
+    ["Harder contact skills", "Particle-fluid pouring and full-size cutlery with the same contact-only physics"],
     ["Core Ultra NPU", "Run the INT8 policy on the NPU and the planner on the iGPU concurrently"],
     ["Real SO-101 arms", "Same plan language and policy interface on two physical arms"],
   ];

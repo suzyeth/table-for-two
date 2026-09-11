@@ -29,12 +29,12 @@ POLICY_DIR = ROOT / "models" / "policy"
 OUT_DIR = ROOT / "out"
 
 INSTRUCTIONS = [
-    "Open the drawer, set the spoon, hand the fork from the left arm to the right arm, put the plate on "
-    "the placemat, then hold the mug with the left arm and pour from the bottle with the right arm.",
+    "Open the drawer, put the mug in its place and the plate on the placemat, lay the fork, pour the "
+    "water from the bottle into the mug, then hand the spoon from the left arm to the right arm.",
     "Put the plate on the placemat.",
-    "Take the spoon out of the drawer and set it on the table.",
-    "Hold the cup with the right arm and pour water into it with the left arm.",
-    "Pass the fork from the left hand to the right hand and set it down.",
+    "Take the fork out of the drawer and set it on the table.",
+    "Set the cup down and pour some water into it.",
+    "Pass the spoon from the left hand to the right hand and set it down.",
 ]
 POLICY_WARMUP = 10
 POLICY_ITERS = 200
