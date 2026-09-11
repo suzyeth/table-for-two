@@ -15,8 +15,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DECK_DATA = ROOT / "docs" / "slides" / "deck_data.json"
-SUBGOAL_KEYS = ["drawer_open", "spoon_placed", "fork_placed", "plate_placed", "mug_placed", "poured"]
-SUBGOAL_NAMES = ["Drawer opened", "Spoon placed", "Fork handed off + placed", "Plate on placemat", "Mug placed", "Poured"]
+# Plan order of the contact task (sim/task.py DEFAULT_PLAN); deck_data.json lists use the same order.
+SUBGOAL_KEYS = ["drawer_open", "mug_placed", "plate_placed", "fork_placed", "spoon_placed", "poured"]
+SUBGOAL_NAMES = ["Drawer opened", "Mug placed", "Plate on placemat", "Fork placed", "Spoon handed over + placed",
+                 "Poured (≥ 60 % of the water)"]
 
 
 def load(path):

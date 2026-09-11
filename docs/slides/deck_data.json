@@ -6,14 +6,14 @@
     "model": "Qwen2.5-1.5B-Instruct INT4 (OpenVINO GenAI)",
     "cpu_latency_s": 2.12,
     "igpu_latency_s": 2.22,
-    "unit_tests": 16
+    "unit_tests": 19
   },
   "data": {
-    "episodes": 50,
-    "frames": 32285,
+    "episodes": 150,
+    "frames": 114750,
     "fps": 10,
-    "train_steps": 20000,
-    "scripted_success_on_train_seeds": "50 of 51 seeds"
+    "train_steps": 40000,
+    "scripted_success_on_train_seeds": "pending"
   },
   "latency": [
     {
@@ -37,11 +37,11 @@
   "int8_action_error_rad": 0.02012,
   "subgoals": [
     "Drawer opened",
-    "Spoon placed",
-    "Fork handed off + placed",
-    "Plate on placemat",
     "Mug placed",
-    "Poured"
+    "Plate on placemat",
+    "Fork placed",
+    "Spoon handed over + placed",
+    "Poured (≥ 60 % of the water)"
   ],
   "scripted_10_seeds": [
     10,
@@ -51,24 +51,11 @@
     10,
     10
   ],
-  "policy_10_seeds": [
-    10,
-    4,
-    5,
-    10,
-    10,
-    10
-  ],
-  "hybrid_10_seeds": [
-    10,
-    9,
-    9,
-    10,
-    9,
-    7
-  ],
-  "policy_full_task": 4,
-  "hybrid_full_task": 6,
-  "failure_note": "Spoon: grasped in 10/10 seeds, set down 3.3–4.6 cm from target (pass line 3 cm). Pour: failed seeds stop at ~47° tilt.",
+  "scripted_full_task": 10,
+  "policy_10_seeds": null,
+  "hybrid_10_seeds": null,
+  "policy_full_task": null,
+  "hybrid_full_task": null,
+  "failure_note": null,
   "hardware_note": "Measured on Intel Core i9-14900HX + Raptor Lake iGPU; bench/benchmark.py reproduces every number on a Core Ultra in one command."
 }

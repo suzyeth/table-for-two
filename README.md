@@ -75,11 +75,20 @@ single-object labs and the per-stage tracer used to find each of these.
 
 ## Results
 
-**Scripted contact pipeline, 10 held-out seeds (0–9):** 9/10 full task
-(drawer, plate, fork, spoon and mug 10/10; pour 9/10). The one failure was a
-bottle placed 3 mm inside the side grip's reach; gripping the bottle higher when
-needed makes all 30/30 randomised scenes reachable, and both affected seeds
-(5 and 16) now pass.
+**Scripted contact pipeline, 10 held-out seeds (0–9):** 10/10 full task.
+
+| Sub-goal | Success |
+|---|---|
+| Drawer opened (pulled by its handle) | 10/10 |
+| Mug placed | 10/10 |
+| Plate on placemat | 10/10 |
+| Fork placed | 10/10 |
+| Spoon handed over and placed | 10/10 |
+| Poured (≥ 60 % of the 24 water beads inside the mug) | 10/10 |
+
+An earlier run failed one seed: randomisation stood the bottle 3 mm inside the
+side grip's reach. Gripping the bottle higher when needed made all 30/30
+randomised scenes reachable.
 
 **Language planner on Intel hardware** (`bench/benchmark.py`, 5 instructions):
 
