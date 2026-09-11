@@ -15,17 +15,21 @@ def test_example_plan_is_semantically_clean():
     assert check_semantics(EXAMPLE_PLAN) == []
 
 
+def test_example_plan_matches_the_executor_default_plan():
+    from sim.task import DEFAULT_PLAN
+    assert EXAMPLE_PLAN == DEFAULT_PLAN
+
+
 def test_parse_compact_plan_with_parallel_stage():
-    plan = parse_plan_text("open_drawer left\npick_hold left mug ; pick_lift right bottle")
+    plan = parse_plan_text("open_drawer left ; pick_place right mug\npick_lift right bottle")
     assert plan == [
-        [{"skill": "open_drawer", "arm": "left"}],
-        [{"skill": "pick_hold", "arm": "left", "object": "mug"},
-         {"skill": "pick_lift", "arm": "right", "object": "bottle"}],
+        [{"skill": "open_drawer", "arm": "left"}, {"skill": "pick_place", "arm": "right", "object": "mug"}],
+        [{"skill": "pick_lift", "arm": "right", "object": "bottle"}],
     ]
 
 
 def test_synonyms_map_cup_to_mug():
-    plan = parse_plan_text("pick_hold right cup")
+    plan = parse_plan_text("pick_place right cup")
     assert plan[0][0]["object"] == "mug"
 
 
@@ -52,11 +56,20 @@ def test_semantics_flags_utensil_before_drawer():
     assert any("open the drawer" in message for _, _, message in problems)
 
 
-def test_semantics_flags_pour_without_bottle_and_unfinished_hold():
-    plan = parse_plan_text("pick_hold left mug\npour right mug")
-    messages = [message for _, _, message in check_semantics(plan)]
+def test_semantics_flags_pour_without_bottle():
+    messages = [m for _, _, m in check_semantics(parse_plan_text("pick_place right mug\npour right mug"))]
     assert any("pour needs the bottle" in m for m in messages)
-    assert any("ends with the left arm holding the mug" in m for m in messages)
+
+
+def test_semantics_flags_pour_before_the_mug_is_in_place_and_unreturned_bottle():
+    messages = [m for _, _, m in check_semantics(parse_plan_text("pick_lift right bottle\npour right mug"))]
+    assert any("set the mug down" in m for m in messages)
+    assert any("ends with the right arm holding the bottle" in m for m in messages)
+
+
+def test_scene_state_counts_a_mug_already_in_place():
+    plan = parse_plan_text("pick_lift right bottle\npour right mug\nreturn right bottle")
+    assert check_semantics(plan, {"done": ["mug_placed"]}) == []
 
 
 def test_repair_drops_a_stray_place_step():
@@ -71,15 +84,15 @@ def test_scene_state_skips_the_drawer_when_already_open():
     assert problems and "already open" in problems[0][2]
 
 
-def test_keyword_fallback_honours_named_arms_for_pouring():
-    plan = keyword_plan("Hold the cup with the right arm and pour with the left arm")
-    hold = next(s for stage in plan for s in stage if s["skill"] == "pick_hold")
-    pour = next(s for stage in plan for s in stage if s["skill"] == "pour")
-    assert (hold["arm"], pour["arm"]) == ("right", "left")
+def test_keyword_fallback_pours_after_setting_the_mug():
+    plan = keyword_plan("Pour some water into the cup")
+    skills = [(s["skill"], s.get("object", s.get("into"))) for stage in plan for s in stage]
+    assert skills.index(("pick_place", "mug")) < skills.index(("pour", "mug"))
     assert check_semantics(plan) == []
 
 
-def test_keyword_fallback_opens_drawer_before_utensils():
+def test_keyword_fallback_hands_the_spoon_over_by_default():
     plan = keyword_plan("Set the spoon and the fork")
     assert plan[0][0]["skill"] == "open_drawer"
+    assert any(s["skill"] == "handoff" and s["object"] == "spoon" for stage in plan for s in stage)
     assert check_semantics(plan) == []

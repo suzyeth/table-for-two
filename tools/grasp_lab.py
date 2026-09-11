@@ -90,7 +90,8 @@ def add_shell_body(body, radius, height, wall, mass, friction, rgba):
                       pos=[mid_r * np.cos(theta), mid_r * np.sin(theta), height / 2],
                       quat=[np.cos(theta / 2), 0, 0, np.sin(theta / 2)], mass=mass * 0.8 / SHELL_SEGMENTS,
                       friction=friction, condim=4, rgba=rgba)
-    body.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[radius, 0.0025], pos=[0, 0, 0.0025],
+    # 8 mm base, as in the scene (a thinner disc lets stacked beads tunnel through it).
+    body.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[radius, 0.004], pos=[0, 0, 0.004],
                   mass=mass * 0.2, friction=friction, condim=4, rgba=rgba)
 
 

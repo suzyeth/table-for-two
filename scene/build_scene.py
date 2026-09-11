@@ -13,7 +13,12 @@ actually matter (the robustness perturbations the brief scores).
     bottle built as thin-walled shells; 24 beads inside the bottle standing in
     for water (0.27 g each, like 0.27 ml).
   * Layout from the SO-101 reach map: top-down grasps are reachable 13-28 cm
-    from a base and up to ~8 cm above the table, so every pick point sits there.
+    from a base and up to ~8 cm above the table, so every top-down pick and
+    place point sits there. A jaws-horizontal side grip near the table (how
+    the bottle must be held so its mouth stays free for pouring) only reaches
+    >= ~30 cm out, so the bottle stands at the far edge of the right arm's
+    workspace. The left arm works the cabinet, fork and plate; the right arm
+    the mug and bottle; the spoon is handed over between them.
 
 World frame: +x away from the arm bases, +y toward the left arm, z up (m).
 
@@ -48,29 +53,52 @@ STEEL = [0.72, 0.73, 0.78, 1.0]
 CERAMIC = [0.95, 0.95, 0.95, 1.0]
 PROP_FRICTION = [1.0, 0.005, 0.0001]
 
-# Cabinet on the right-front, drawer sliding toward the arms (-x).
-CABINET = {"pos": (0.12, -0.10), "half": (0.045, 0.055), "height": 0.050, "wall": 0.004}
-DRAWER = {"travel": 0.065, "wall_h": 0.014, "damping": 0.5, "frictionloss": 0.3}
-HANDLE = {"bar_half": (0.004, 0.022, 0.004), "standoff": 0.014}
+# Cabinet on the left-front, drawer sliding toward the arms (-x). The drawer handle is a
+# bar on stand-offs, pinched top-down with one finger between bar and drawer front.
+# Full-extension drawer: pulled 10 cm, the 9.6 cm utensils come out from under the
+# cabinet top entirely, so they can be lifted straight up.
+CABINET = {"pos": (0.14, 0.19), "half": (0.060, 0.065), "height": 0.050, "wall": 0.004}
+DRAWER = {"travel": 0.105, "wall_h": 0.014, "damping": 0.5, "frictionloss": 0.3}
+# Bar pull 2.8 cm off the drawer front (typical for real pulls); posts clear the 3 cm-wide jaws.
+HANDLE = {"bar_half": (0.004, 0.030, 0.004), "standoff": 0.028}
 
 # Shell containers: outer radius, height, wall thickness, mass, segments.
-MUG = {"pos": (0.00, 0.14), "radius": 0.020, "height": 0.060, "wall": 0.0025, "mass": 0.12, "rgba": [0.2, 0.45, 0.8, 1]}
-BOTTLE = {"pos": (-0.02, -0.21), "radius": 0.016, "height": 0.070, "wall": 0.002, "mass": 0.10, "rgba": [0.3, 0.75, 0.4, 0.85]}
+# 4.8 cm across (espresso-cup size): still inside the jaws' reach, and a wider target for the pour.
+MUG = {"pos": (0.00, -0.15), "radius": 0.024, "height": 0.060, "wall": 0.0025, "mass": 0.12, "rgba": [0.2, 0.45, 0.8, 1]}
+BOTTLE = {"pos": (0.12, -0.22), "radius": 0.016, "height": 0.070, "wall": 0.002, "mass": 0.10, "rgba": [0.3, 0.75, 0.4, 0.85]}
 SHELL_SEGMENTS = 16
-WATER = {"count": 24, "radius": 0.004, "mass": 0.00027, "rgba": [0.35, 0.6, 1.0, 1]}
+# 8 mm container bases (like real cups and bottles). With 5 mm bases, beads landing on
+# beads drove the lowest ones more than half-way into the disc, where the contact pushes
+# them out through the bottom - water "leaking" through a solid base.
+SHELL_BASE_HALF = 0.004
+# Stiffer bead contacts (time constant 2x the 2 ms timestep, MuJoCo's recommended minimum).
+WATER = {"count": 24, "radius": 0.004, "mass": 0.00027, "rgba": [0.35, 0.6, 1.0, 1], "solref": [0.004, 1.0]}
 
 # Deep plate: a low wall around a base. A top-down pinch on the wall gives a vertical
 # contact line that resists the plate pivoting (a flat rim only gives point contact).
-PLATE = {"pos": (0.05, 0.05), "radius": 0.045, "height": 0.020, "wall": 0.003, "mass": 0.12, "rgba": CERAMIC}
-# Utensils rest across the front of the drawer; x is relative to the cabinet centre.
-UTENSILS = {"spoon": -0.028, "fork": -0.008}
-UTENSIL_HANDLE = (0.030, 0.005, 0.0025)
+PLATE = {"pos": (0.06, 0.06), "radius": 0.045, "height": 0.020, "wall": 0.003, "mass": 0.12, "rgba": CERAMIC}
+# Utensils lie front-to-back in the drawer like in a cutlery drawer: long axis along x,
+# head toward the back (+x), handle ends toward the arms so they come out first. They sit
+# 4.8 cm apart so the jaws, closing sideways, keep the moving finger's back (~2.5 cm out)
+# clear of the drawer side wall and the thin fixed finger clear of the other utensil.
+# (x, y) are the handle-centre offsets from the cabinet centre.
+UTENSILS = {"spoon": (-0.023, -0.022), "fork": (-0.023, 0.022)}
+# 7 cm handle (room for two grippers during the hand-over), 10 mm square like a sturdy
+# wooden or children's utensil. The SO-101 jaws end ~8 mm below the TCP, so a flat 5 mm
+# handle leaves the pads only its top 1-2 mm once the jaws stop above the table; and on a
+# 6 mm-wide handle the jaws sit almost fully shut (-0.156 of -0.17 rad), so the ~80 N
+# squeeze slowly pushes through the soft contact until the handle pops out.
+UTENSIL_HANDLE = (0.035, 0.005, 0.005)
 
+# Place setting, seen from the arms: plate on the mat, fork left, spoon right (both
+# laid along x), mug to the front right where the right arm can pour into it.
+# Every grasp point at placing stays >= ~13 cm from its arm's base (the inner edge of
+# top-down reach).
 PLACE_TARGETS = {
-    "plate": (-0.06, 0.00),
-    "fork": (-0.06, 0.085),   # fork on the left of the plate
-    "spoon": (-0.06, -0.085),  # spoon on the right
-    "mug": (0.01, 0.10),
+    "plate": (-0.02, 0.03),
+    "fork": (-0.02, 0.10),
+    "spoon": (-0.03, -0.06),
+    "mug": (0.06, -0.05),
 }
 
 
@@ -145,7 +173,7 @@ def add_shell(spec, name, params, extra_geoms=()):
                       pos=[mid_r * np.cos(theta), mid_r * np.sin(theta), height / 2],
                       quat=[np.cos(theta / 2), 0, 0, np.sin(theta / 2)], mass=wall_mass,
                       friction=PROP_FRICTION, condim=4, rgba=params["rgba"])
-    body.add_geom(name=f"{name}_base", type=CYLINDER, size=[r, 0.0025], pos=[0, 0, 0.0025],
+    body.add_geom(name=f"{name}_base", type=CYLINDER, size=[r, SHELL_BASE_HALF], pos=[0, 0, SHELL_BASE_HALF],
                   mass=params["mass"] * 0.2, friction=PROP_FRICTION, condim=4, rgba=params["rgba"])
     for geom in extra_geoms:
         body.add_geom(**geom)
@@ -162,11 +190,11 @@ def add_water(spec):
         theta = 2 * np.pi * slot / per_layer + layer * 0.5
         radial = inner * (0.55 if slot % 2 else 0.95)
         pos = [bx + radial * np.cos(theta), by + radial * np.sin(theta),
-               TABLE_TOP_Z + 0.006 + WATER["radius"] + layer * 2.05 * WATER["radius"]]
+               TABLE_TOP_Z + 2 * SHELL_BASE_HALF + 0.001 + WATER["radius"] + layer * 2.05 * WATER["radius"]]
         bead = spec.worldbody.add_body(name=f"water_{i}", pos=pos)
         bead.add_freejoint(name=f"water_{i}_free")
         bead.add_geom(name=f"water_{i}_geom", type=SPHERE, size=[WATER["radius"], 0, 0], mass=WATER["mass"],
-                      friction=[0.3, 0.001, 0.0001], condim=3, rgba=WATER["rgba"])
+                      friction=[0.3, 0.001, 0.0001], condim=3, solref=WATER["solref"], rgba=WATER["rgba"])
 
 
 def add_plate(spec):
@@ -175,23 +203,24 @@ def add_plate(spec):
 
 
 def add_utensils(spec):
-    """Spoon (handle + bowl) and fork (handle + three tines), long axis along y, in the drawer."""
+    """Spoon (handle + bowl) and fork (handle + three tines), long axis along x, in the drawer."""
     cx, cy = CABINET["pos"]
     floor_z = TABLE_TOP_Z + CABINET["wall"] + 0.004
-    yaw90 = [np.cos(np.pi / 4), 0, 0, np.sin(np.pi / 4)]
     hx, hy, hz = UTENSIL_HANDLE
-    for name, dx in UTENSILS.items():
-        body = spec.worldbody.add_body(name=name, pos=[cx + dx, cy, floor_z + hz + 0.0005], quat=yaw90)
+    for name, (dx, dy) in UTENSILS.items():
+        body = spec.worldbody.add_body(name=name, pos=[cx + dx, cy + dy, floor_z + hz + 0.0005])
         body.add_freejoint(name=f"{name}_free")
         body.add_geom(name=f"{name}_geom", type=BOX, size=[hx, hy, hz], mass=0.018, friction=PROP_FRICTION,
                       condim=4, rgba=STEEL)
         if name == "spoon":
-            body.add_geom(name="spoon_bowl", type=ELLIPSOID, size=[0.014, 0.010, 0.0035], pos=[hx + 0.012, 0, 0],
-                          mass=0.008, friction=PROP_FRICTION, condim=4, rgba=STEEL)
+            # A thin, light bowl on a sturdy handle keeps the balance point near the handle.
+            body.add_geom(name="spoon_bowl", type=ELLIPSOID, size=[0.014, 0.010, 0.0035],
+                          pos=[hx + 0.012, 0, 0.0035 - hz], mass=0.004, friction=PROP_FRICTION, condim=4, rgba=STEEL)
         else:
             for k, ty in enumerate((-0.004, 0.0, 0.004)):
                 body.add_geom(name=f"fork_tine_{k}", type=BOX, size=[0.010, 0.0012, 0.0012],
-                              pos=[hx + 0.010, ty, 0], mass=0.002, friction=PROP_FRICTION, condim=4, rgba=STEEL)
+                              pos=[hx + 0.010, ty, 0.0012 - hz], mass=0.002, friction=PROP_FRICTION, condim=4,
+                              rgba=STEEL)
 
 
 def add_containers(spec):

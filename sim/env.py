@@ -18,6 +18,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from scene.build_scene import MUG as SCENE_MUG
 from sim.ik import ArmIK
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,12 +44,12 @@ PLACE_TOL = 0.03
 UPRIGHT_TOL_DEG = 12
 DRAWER_OPEN_MIN = 0.045
 POUR_FRACTION = 0.6
-MUG_INNER_RADIUS = 0.0175
-MUG_HEIGHT = 0.060
+MUG_INNER_RADIUS = SCENE_MUG["radius"] - SCENE_MUG["wall"]
+MUG_HEIGHT = SCENE_MUG["height"]
 
 # Randomisation ranges.
 XY_JITTER = {"plate": 0.012, "mug": 0.012, "bottle": 0.012, "spoon": 0.004, "fork": 0.004}
-UTENSIL_YAW = 0.15
+UTENSIL_YAW = 0.08  # rad; the drawer leaves ~6 mm beside each utensil for the fingers
 MASS_SCALE = (0.8, 1.2)
 FRICTION_SCALE = (0.7, 1.3)
 LIGHT_SCALE = (0.6, 1.2)
@@ -186,6 +187,9 @@ class DinnerTableEnv:
 
     def handle_point(self):
         return self.data.geom_xpos[self.handle_geom].copy()
+
+    def arm_base(self, arm):
+        return self.data.xpos[self.model.body(arm + "base").id].copy()
 
     # --------------------------------------------------------------- contact
     def _contact_bodies(self, obj):

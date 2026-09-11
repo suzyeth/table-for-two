@@ -5,14 +5,16 @@ same time (at most one per arm). Subtasks use a small, closed vocabulary so a
 language planner can emit them as JSON:
 
   {"skill": "open_drawer", "arm": "left"}
-  {"skill": "pick_place", "arm": "right", "object": "plate"}
-  {"skill": "handoff", "object": "fork", "giver": "left", "receiver": "right"}
-  {"skill": "pick_hold", "arm": "left", "object": "mug"}
+  {"skill": "pick_place", "arm": "right", "object": "mug"}      (plate, spoon, fork or mug)
+  {"skill": "handoff", "object": "spoon", "giver": "left", "receiver": "right"}
   {"skill": "pick_lift", "arm": "right", "object": "bottle"}
   {"skill": "pour", "arm": "right", "into": "mug"}
-  {"skill": "place", "arm": "left", "object": "mug"}
   {"skill": "return", "arm": "right", "object": "bottle"}
+  {"skill": "place", "arm": "left", "object": "mug"}
   {"skill": "home", "arm": "left"}
+
+All grasps are contact-only (see sim/skills.py): an object moves only while
+the fingers hold it by friction.
 
 Run:  .venv\\Scripts\\python.exe -m sim.task --seeds 0 1 2 --video out/scripted.mp4
 """
@@ -23,35 +25,46 @@ from pathlib import Path
 import numpy as np
 
 from sim.env import ARMS, TABLE_TOP_Z, DinnerTableEnv
+from sim.grasping import horizontal, utensil_axis
 from sim.skills import ArmSkills
 
 ARM_KEY = {"left": "left_", "right": "right_"}
-# Where the left arm holds the mug for pouring (mirrored in y when the right arm
-# holds it): slightly toward the pouring arm's side, so the pourer's shoulder
-# never has to swing into the holding arm. Chosen by a sweep over four
-# candidates on the seeds that failed before (6/6 poured, 6/6 full task).
-HOLD_POINT = np.array([0.00, -0.03, TABLE_TOP_Z + 0.10])
-HANDOFF_POINT = np.array([-0.04, 0.0, TABLE_TOP_Z + 0.13])
-HANDOFF_REACH = 0.03  # receiver grasps this far along the object from its centre
-HANDOFF_GIVER_OFFSET = 0.02  # giver grasps this far from the centre on its own side
+UTENSILS = ("spoon", "fork")
+# Utensils are laid along x beside the plate: jaws close along y when setting them down.
+UTENSIL_PLACE_CLOSING = np.array([0.0, 1.0, 0.0])
+# Utensils are taken near the handle end facing the arms (the part out of the drawer).
+TOWARD_ARMS = np.array([-1.0, 0.0, 0.0])
+UTENSIL_PICK_ALONG = 0.015
+# Hand-over: the giver turns the utensil and holds its origin at HANDOFF_POINT with the head
+# toward the receiver, 30 deg off crosswise; each hand takes its own end of the 7 cm handle,
+# 2.8 cm from the centre. Each wrist-camera mount sticks out 4-8 cm to one side of its
+# hand and each wrist link ~4 cm to the other, so both hands keep the camera side facing
+# away from the other hand. A search over hand-over angle, grip points, height and camera
+# sides (both arms solved, collision-body distances measured) found this the only layout
+# with >1 cm between the arms; straight crosswise they touch.
+HANDOFF_POINT = np.array([-0.01, 0.0, TABLE_TOP_Z + 0.06])
+HANDOFF_YAW_DEG = -30  # head direction turned from crosswise (sign mirrors for a right-arm giver)
+HANDOFF_GIVER_ALONG = 0.028
+HANDOFF_RECEIVER_ALONG = 0.028
+# The receiver first lines up this far out on its own side, then moves in over its end.
+HANDOFF_APPROACH = 0.05
+HOLD_POINT = np.array([0.02, 0.0, TABLE_TOP_Z + 0.03])  # pick_hold: mug origin held here
+MAX_STEPS = 6000
 
 DEFAULT_INSTRUCTION = (
-    "Open the drawer, take out the spoon and fork, put the plate on the placemat, "
-    "set the spoon on the left and the fork on the right, then hold the mug with the "
-    "left arm and pour from the bottle with the right arm."
+    "Open the drawer, put the mug at the front right and the plate on the placemat, lay the fork "
+    "left of the plate, pour the water from the bottle into the mug and put the bottle back, then "
+    "hand the spoon to the right arm to lay on the right."
 )
-# Utensils come straight after the drawer: later arm motions can nudge the
-# drawer back in, which would hide them under the cabinet top.
+# The plate goes down before the fork (setting the plate beside a laid fork knocks it), and
+# the right arm finishes with the bottle before it takes the spoon.
 DEFAULT_PLAN = [
-    [{"skill": "open_drawer", "arm": "left"}],
-    [{"skill": "pick_place", "arm": "left", "object": "spoon"}],
-    [{"skill": "handoff", "object": "fork", "giver": "left", "receiver": "right"}],
-    [{"skill": "pick_place", "arm": "right", "object": "plate"}],
-    [{"skill": "pick_hold", "arm": "left", "object": "mug"},
+    [{"skill": "open_drawer", "arm": "left"}, {"skill": "pick_place", "arm": "right", "object": "mug"}],
+    [{"skill": "pick_place", "arm": "left", "object": "plate"},
      {"skill": "pick_lift", "arm": "right", "object": "bottle"}],
-    [{"skill": "pour", "arm": "right", "into": "mug"}],
-    [{"skill": "return", "arm": "right", "object": "bottle"},
-     {"skill": "place", "arm": "left", "object": "mug"}],
+    [{"skill": "pick_place", "arm": "left", "object": "fork"}, {"skill": "pour", "arm": "right", "into": "mug"}],
+    [{"skill": "return", "arm": "right", "object": "bottle"}],
+    [{"skill": "handoff", "object": "spoon", "giver": "left", "receiver": "right"}],
     [{"skill": "home", "arm": "left"}, {"skill": "home", "arm": "right"}],
 ]
 
@@ -70,7 +83,10 @@ class Executor:
 
     def reset(self):
         self.skills = {a: ArmSkills(self.env, a) for a in ARMS}
-        self.start_xy = {o: self.env.grasp_point(o)[:2].copy() for o in ("bottle", "mug", "plate")}
+        self.start_xy = {o: self.env.object_frame(o)[0][:2].copy() for o in ("bottle", "mug", "plate")}
+
+    def warnings(self):
+        return [w for a in ARMS for w in self.skills[a].warnings]
 
     # ----------------------------------------------------------- expansion
     def _arm(self, subtask, key="arm"):
@@ -98,68 +114,76 @@ class Executor:
             sub[arm] = self._factory(arm, subtask)
         return [sub]
 
+    def _place_closing(self, obj):
+        return UTENSIL_PLACE_CLOSING if obj in UTENSILS else None
+
+    def _turned_closing(self, skills, obj, new_axis):
+        """Jaw closing direction that turns the held utensil's head to point along ``new_axis``."""
+        axis = utensil_axis(self.env, obj)
+        angle = np.arctan2(np.cross(axis, new_axis)[2], axis @ new_axis)
+        closing = horizontal(skills.frame()[1][:, 0])
+        c, s = np.cos(angle), np.sin(angle)
+        return np.array([c * closing[0] - s * closing[1], s * closing[0] + c * closing[1], 0.0])
+
     def _factory(self, arm, subtask):
         sk, skill, obj = self.skills[arm], subtask.get("skill"), subtask.get("object")
         if skill == "open_drawer":
             return sk.open_drawer
         if skill == "pick_place":
-            return lambda: sk.pick_place(obj, self._target_xy(obj))
+            along, toward = (UTENSIL_PICK_ALONG, TOWARD_ARMS) if obj in UTENSILS else (0.0, None)
+            return lambda: _chain(sk.pick(obj, along, toward),
+                                  sk.place(obj, self._target_xy(obj), self._place_closing(obj)), sk.home())
         if skill == "pick_hold":
-            # Hold the mug on the holding arm's own side of the table.
-            hold = HOLD_POINT * np.array([1.0, 1.0 if arm == "left_" else -1.0, 1.0])
-            return lambda: _chain(sk.pick(obj), sk.lift_to(hold))
+            return lambda: _chain(sk.pick(obj), sk.carry(obj, HOLD_POINT))
         if skill == "pick_lift":
-            return lambda: sk.pick(obj)
+            return sk.side_pick_bottle if obj == "bottle" else (lambda: sk.pick(obj))
         if skill == "pour":
             return lambda: sk.pour_into(subtask.get("into", "mug"))
         if skill == "place":
-            return lambda: sk.place(obj, self._target_xy(obj))
+            return lambda: _chain(sk.place(obj, self._target_xy(obj), self._place_closing(obj)), sk.home())
         if skill == "return":
-            return lambda: sk.place(obj, self.start_xy[obj])
+            if obj == "bottle":
+                return lambda: _chain(sk.return_bottle(self.start_xy[obj]), sk.home())
+            return lambda: _chain(sk.place(obj, self.start_xy[obj]), sk.home())
         if skill == "home":
             return sk.home
         raise PlanError(f"unknown skill '{skill}'")
 
     def _handoff(self, subtask):
         giver, receiver = self._arm(subtask, "giver"), self._arm(subtask, "receiver")
+        if giver == receiver:
+            raise PlanError("a handoff needs two different arms")
         obj = subtask["object"]
+        if obj not in UTENSILS:
+            raise PlanError("only the spoon or fork can be handed over")
         g, r = self.skills[giver], self.skills[receiver]
-        toward_receiver = np.array([0.0, 1.0 if receiver == "left_" else -1.0, 0.0])
-
-        def long_axis():
-            """Utensil long axis (body x) in world frame, pointing toward the receiver."""
-            axis = self.env.data.xmat[self.env.body_ids[obj]].reshape(3, 3)[:, 0]
-            return axis * (np.sign(axis @ toward_receiver) or 1.0)
-
-        def giver_pick():
-            # Grip the giver's end so the receiver's end stays free.
-            yield from g.pick(obj, offset=-HANDOFF_GIVER_OFFSET * long_axis())
-
-        def receiver_grasp():
-            point = self.env.grasp_point(obj) + HANDOFF_REACH * long_axis() + [0.0, 0.0, 0.004]
-            yield from r.move(point + [0.0, 0.0, 0.05], grip=1.0)
-            yield from r.move(point, speed=0.5)
-            yield from r.grip(0.05, intent=obj)
-
-        # Utensils already lie along y, so a top-down pick keeps the long axis
-        # spanning the gap between the arms; no wrist roll needed.
+        side = -1.0 if giver == "left_" else 1.0
+        yaw = np.deg2rad(HANDOFF_YAW_DEG) * -side
+        toward_receiver = np.array([-np.sin(yaw) * side, np.cos(yaw) * side, 0.0])
+        # The giver's camera side starts toward the handle end (away from the head), so once the
+        # hand turns the head toward the receiver it faces back to the giver's own side.
         return [
-            {giver: giver_pick},
-            {giver: lambda: g.lift_to(HANDOFF_POINT)},
-            {receiver: receiver_grasp},
-            {giver: g.release_and_retreat},
-            {giver: g.home, receiver: lambda: r.place(obj, self._target_xy(obj))},
+            {giver: lambda: g.pick(obj, along=HANDOFF_GIVER_ALONG, toward=TOWARD_ARMS,
+                                   camera_side=-utensil_axis(self.env, obj))},
+            {giver: lambda: g.carry(obj, HANDOFF_POINT, closing=self._turned_closing(g, obj, toward_receiver))},
+            {receiver: lambda: r.pick(obj, along=HANDOFF_RECEIVER_ALONG, toward=toward_receiver, lift=0,
+                                      approach_from=toward_receiver * HANDOFF_APPROACH,
+                                      camera_side=toward_receiver)},
+            {giver: lambda: _chain(g.release_and_retreat(), g.home())},
+            {receiver: lambda: _chain(r.place(obj, self._target_xy(obj), UTENSIL_PLACE_CLOSING), r.home())},
         ]
 
     # ------------------------------------------------------------- running
     def _report(self, label):
         env = self.env
-        positions = {o: np.round(env.grasp_point(o), 3).tolist() for o in ("plate", "mug", "bottle", "spoon", "fork")}
+        positions = {o: np.round(env.object_frame(o)[0], 3).tolist() for o in ("plate", "mug", "bottle", "spoon", "fork")}
+        holders = {o: env.holder(o) for o in ("plate", "mug", "bottle", "spoon", "fork")}
         drawer = float(env.data.qpos[env.drawer_qadr])
-        print(f"  [{label}] held={env.held} drawer={drawer:.3f} pour={env.pour_time:.2f}s")
+        print(f"  [{label}] held={ {o: h for o, h in holders.items() if h} } drawer={drawer:.3f} "
+              f"water_in_mug={env.water_in_mug()}")
         print(f"      {positions}")
 
-    def run(self, plan, on_step=None, max_steps=4000, verbose=False):
+    def run(self, plan, on_step=None, max_steps=MAX_STEPS, verbose=False):
         """Execute ``plan``; ``on_step(action, stage_name)`` is called before every env step."""
         steps = 0
         for index, stage in enumerate(plan):
@@ -212,21 +236,29 @@ def main():
     parser = argparse.ArgumentParser(description="Run the scripted dinner-table plan on seeded scenes.")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)))
     parser.add_argument("--plan", type=Path, help="JSON plan file; defaults to the built-in plan")
+    parser.add_argument("--stages", type=int, help="run only the first N stages (debugging)")
     parser.add_argument("--video", type=Path, help="write an MP4 of all seeds")
+    parser.add_argument("--camera", default="operator")
     parser.add_argument("--verbose", action="store_true", help="print held objects and positions per stage")
     args = parser.parse_args()
 
     plan = json.loads(args.plan.read_text(encoding="utf-8")) if args.plan else DEFAULT_PLAN
+    if args.stages:
+        plan = plan[:args.stages]
     env = DinnerTableEnv(obs_cameras=())
     executor = Executor(env)
     frames = [] if args.video else None
     results = []
     for seed in args.seeds:
-        result, steps = run_seed(env, executor, seed, plan, video=frames, verbose=args.verbose)
+        result, steps = run_seed(env, executor, seed, plan, video=frames, video_camera=args.camera,
+                                 verbose=args.verbose)
         results.append(result)
         failed = [k for k, v in result.items() if not v and k != "all"]
         print(f"seed {seed:3d}: {'OK  ' if result['all'] else 'FAIL'} steps={steps:4d} "
               f"({steps / 20:.1f}s sim) failed={failed}")
+        if args.verbose:
+            for warning in executor.warnings()[:12]:
+                print(f"    warning: {warning}")
     rate = np.mean([r["all"] for r in results])
     print(f"success rate: {rate * 100:.0f}% over {len(results)} seeds")
     for key in results[0]:

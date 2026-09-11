@@ -43,8 +43,10 @@ GRASP_HEIGHTS = (0.030, 0.024, 0.038)  # grasp centre above the bottle base
 FINGER_OVERLAPS = (0.016, 0.012, 0.020)  # fingertips reach this far past the bottle axis
 PREGRASP = 0.03  # jaw pinch point this far above the bottle mouth before descending
 LIFT = 0.10
-TILTS_DEG = (0, 20, 40, 60, 75, 90, 100, 110, 120, 130, 140)
+TILTS_DEG = (0, 20, 40, 60, 70, 80, 88, 95, 100, 105, 110, 120, 130, 140)
 CLEARANCES = np.arange(0.010, 0.080, 0.005)  # whole bottle above the mug rim
+POUR_START_DEG = 70  # from here on water may leave, so the lip must stay low over the mug
+POUR_MAX_CLEARANCE = 0.03
 MAX_POS_ERR = 0.003
 MAX_ROT_ERR = np.deg2rad(3)
 MIN_RADIAL_APPROACH = 0.3  # fingers must point away from the arm base, not back at it
@@ -77,10 +79,10 @@ def build(bottle_friction):
         radial = inner * (0.55 if slot % 2 else 0.95)
         bead = spec.worldbody.add_body(name=f"water_{i}", pos=[BOTTLE["xy"][0] + radial * np.cos(theta),
                                                                BOTTLE["xy"][1] + radial * np.sin(theta),
-                                                               0.006 + BEADS["radius"] + layer * 2.05 * BEADS["radius"]])
+                                                               0.009 + BEADS["radius"] + layer * 2.05 * BEADS["radius"]])
         bead.add_freejoint()
         bead.add_geom(type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[BEADS["radius"], 0, 0], mass=BEADS["mass"],
-                      friction=[0.3, 0.001, 0.0001], condim=3, rgba=[0.35, 0.6, 1.0, 1])
+                      friction=[0.3, 0.001, 0.0001], condim=3, solref=[0.004, 1.0], rgba=[0.35, 0.6, 1.0, 1])
     with contextlib.redirect_stderr(io.StringIO()):
         spec.attach(arm, prefix=PREFIX, frame=spec.worldbody.add_frame(pos=[0, 0, 0]))
         return spec.compile()
@@ -264,7 +266,8 @@ class Lab:
         plan = []
         for index, tilt_deg in enumerate(TILTS_DEG):
             chosen = None
-            for clearance in CLEARANCES:
+            limit = POUR_MAX_CLEARANCE if tilt_deg >= POUR_START_DEG else CLEARANCES[-1]
+            for clearance in CLEARANCES[CLEARANCES <= limit + 1e-9]:
                 q_try, err = self.pour_pose(q, np.deg2rad(tilt_deg), lean, rim, lip, outline, axis_g, clearance,
                                             restarts=index == 0)
                 if self.ok(err):
@@ -348,9 +351,9 @@ def run(friction, render=True):
     if render:
         lab.snapshot("lifted", focus)
     for tilt, clearance, q in plan:
-        lab.go(q, SQUEEZE, 0.5 if tilt < 90 else 0.8)
-        if tilt >= 90:
-            lab.settle(0.5)
+        lab.go(q, SQUEEZE, 0.5 if tilt < POUR_START_DEG else 0.8)
+        if tilt >= 95:
+            lab.settle(0.4)
         census = bead_census(m, d)
         tilt_now = np.degrees(np.arccos(np.clip(d.xmat[lab.bottle][8], -1, 1)))
         print(f"   tilt {tilt:3d} (bottle {tilt_now:5.1f} deg, clearance {clearance * 100:.1f} cm): "

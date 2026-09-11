@@ -4,17 +4,17 @@ A small instruction-tuned LLM (Qwen2.5-1.5B-Instruct, INT4, OpenVINO IR) runs
 through OpenVINO GenAI. Instead of verbose JSON (which a 1.5B model tends to
 break) it writes a compact plan language, one stage per line:
 
-    open_drawer left
-    pick_place left spoon
-    handoff fork left right
-    pick_hold left mug ; pick_lift right bottle
+    open_drawer left ; pick_place right mug
+    pick_place left fork
+    handoff spoon left right
 
 The parser turns that into the JSON plan ``sim.task.Executor`` runs. Every plan
 passes two checks before execution:
   * syntax  - known skills, arms and objects, one subtask per arm per stage;
   * physics - a small simulation of what each hand holds (no pouring without
-    the bottle, no placing something that is not held, utensils only after the
-    drawer is open, both hands empty at the end).
+    the bottle in hand and the mug set down in its place, no placing something
+    that is not held, utensils only after the drawer is open, both hands empty
+    at the end).
 Errors are fed back to the model for one retry; remaining bad steps are
 dropped; if nothing sensible is left, a keyword planner builds the plan.
 
@@ -62,34 +62,31 @@ SYSTEM_PROMPT = """You plan actions for two robot arms, left and right, that set
 Write the plan one stage per line. Subtasks on the same line run at the same time and are separated
 by " ; ", with at most one subtask per arm. Use only these subtasks (ARM is left or right):
   open_drawer ARM
-  pick_place ARM OBJECT        (OBJECT: plate, spoon or fork; picks it up AND puts it in its place)
+  pick_place ARM OBJECT        (OBJECT: plate, spoon, fork or mug; picks it up AND puts it in its place)
   handoff OBJECT GIVER RECEIVER  (spoon or fork; the receiver puts it in place; alone on its line)
-  pick_hold ARM mug
   pick_lift ARM bottle
   pour ARM mug
-  place ARM mug
   return ARM bottle
   home ARM
 Rules:
 - A cup or glass is the mug.
 - The spoon and fork start inside the closed drawer, so open_drawer comes before them.
-- pick_place already puts the object down: never add place for plate, spoon or fork.
-- To pour: one line "pick_hold ARM mug ; pick_lift OTHER bottle", then "pour OTHER mug",
-  then "return OTHER bottle ; place ARM mug".
-- Use the arm the user names. Otherwise left handles spoon and mug, right handles plate, fork and bottle.
+- pick_place already puts the object down: never add place after it.
+- To pour, the mug must already stand in its place (pick_place ARM mug); then, with one arm,
+  "pick_lift ARM bottle", "pour ARM mug", "return ARM bottle", each on its own line.
+- Use the arm the user names. Otherwise left handles the drawer, fork and plate, right handles the mug
+  and the bottle, and the spoon goes from left to right with a handoff.
 - Only include what the instruction asks for, skip steps listed as done, end with "home left ; home right".
 Write only the plan lines, nothing else."""
 
-EXAMPLE_INSTRUCTION = ("Open the drawer, set the spoon, hand the fork from the left arm to the right arm, "
-                       "put the plate on the placemat, then hold the mug with the left arm and pour from "
-                       "the bottle with the right arm.")
-EXAMPLE_PLAN_TEXT = """open_drawer left
-pick_place left spoon
-handoff fork left right
-pick_place right plate
-pick_hold left mug ; pick_lift right bottle
-pour right mug
-return right bottle ; place left mug
+EXAMPLE_INSTRUCTION = ("Open the drawer, put the mug in its place and the plate on the placemat, lay the "
+                       "fork, pour the water from the bottle into the mug, then hand the spoon from the "
+                       "left arm to the right arm.")
+EXAMPLE_PLAN_TEXT = """open_drawer left ; pick_place right mug
+pick_place left plate ; pick_lift right bottle
+pick_place left fork ; pour right mug
+return right bottle
+handoff spoon left right
 home left ; home right"""
 
 
@@ -161,6 +158,7 @@ def check_semantics(plan, scene_state=None):
     """Simulate what each hand holds; return [(stage, subtask_index or None, message)]."""
     done = set((scene_state or {}).get("done", []))
     drawer_open = "drawer_open" in done
+    placed = {item.removesuffix("_placed") for item in done if item.endswith("_placed")}
     holding = {arm: None for arm in ARMS}
     problems = []
     for s, stage in enumerate(plan):
@@ -179,31 +177,38 @@ def check_semantics(plan, scene_state=None):
                 if drawer_open:
                     problems.append((s, k, "the drawer is already open"))
                 drawer_open = True
-            elif skill == "pick_place" and obj not in ("plate", "spoon", "fork"):
-                problems.append((s, k, "pick_place only moves the plate, spoon or fork"))
+            elif skill == "pick_place":
+                if obj not in ("plate", "spoon", "fork", "mug"):
+                    problems.append((s, k, "pick_place only moves the plate, spoon, fork or mug"))
+                else:
+                    placed.add(obj)
+            elif skill == "handoff":
+                placed.add(obj)
             elif skill == "pick_hold":
                 if obj != "mug":
                     problems.append((s, k, "pick_hold is only for the mug"))
                 else:
                     holding[sub["arm"]] = "mug"
+                    placed.discard("mug")
             elif skill == "pick_lift":
                 if obj != "bottle":
                     problems.append((s, k, "pick_lift is only for the bottle"))
                 else:
                     holding[sub["arm"]] = "bottle"
             elif skill == "pour":
-                other = "left" if sub["arm"] == "right" else "right"
                 if sub.get("into") != "mug":
                     problems.append((s, k, "pour only goes into the mug"))
                 elif holding[sub["arm"]] != "bottle":
                     problems.append((s, k, f"pour needs the bottle in the {sub['arm']} arm first"))
-                elif holding[other] != "mug":
-                    problems.append((s, k, f"the {other} arm must hold the mug while pouring"))
+                elif "mug" not in placed:
+                    problems.append((s, k, "set the mug down in its place before pouring"))
             elif skill in ("place", "return"):
                 if holding[sub["arm"]] != obj:
                     problems.append((s, k, f"the {sub['arm']} arm is not holding the {obj}"))
                 else:
                     holding[sub["arm"]] = None
+                    if skill == "place":
+                        placed.add(obj)
             elif skill == "home" and holding[sub["arm"]]:
                 problems.append((s, k, f"the {sub['arm']} arm goes home still holding the {holding[sub['arm']]}"))
     for arm, obj in holding.items():
@@ -253,33 +258,30 @@ def keyword_plan(instruction, scene_state=None):
     utensils = [u for u in UTENSILS if wants(u, "cutlery", "utensil") and f"{u}_placed" not in done]
     if (wants("drawer") or utensils) and "drawer_open" not in done:
         plan.append([{"skill": "open_drawer", "arm": _arm_named_for(text, ("drawer",)) or "left"}])
+    mug_wanted = wants("mug", "cup", "glass", "pour", "water") and "mug_placed" not in done
+    if mug_wanted:
+        plan.append([{"skill": "pick_place", "arm": _arm_named_for(text, ("mug", "cup", "glass")) or "right",
+                      "object": "mug"}])
     for utensil in utensils:
-        if utensil == "fork" and wants("hand", "pass", "give"):
-            plan.append([{"skill": "handoff", "object": "fork", "giver": "left", "receiver": "right"}])
-        else:
-            arm = _arm_named_for(text, (utensil,)) or ("left" if utensil == "spoon" else "right")
+        arm = _arm_named_for(text, (utensil,))
+        if arm and not wants("hand", "pass", "give"):
             plan.append([{"skill": "pick_place", "arm": arm, "object": utensil}])
+        elif utensil == "spoon" or wants("hand", "pass", "give"):
+            giver = arm or "left"
+            receiver = "right" if giver == "left" else "left"
+            plan.append([{"skill": "handoff", "object": utensil, "giver": giver, "receiver": receiver}])
+        else:
+            plan.append([{"skill": "pick_place", "arm": "left", "object": utensil}])
     if wants("plate", "dish") and "plate_placed" not in done:
-        plan.append([{"skill": "pick_place", "arm": _arm_named_for(text, ("plate", "dish")) or "right",
+        plan.append([{"skill": "pick_place", "arm": _arm_named_for(text, ("plate", "dish")) or "left",
                       "object": "plate"}])
     if wants("pour", "water"):
-        pour_arm = _arm_named_for(text, ("pour", "bottle", "water"))
-        hold_arm = _arm_named_for(text, ("hold", "mug", "cup", "glass"))
-        if pour_arm and not hold_arm:
-            hold_arm = "left" if pour_arm == "right" else "right"
-        hold_arm = hold_arm or "left"
-        pour_arm = pour_arm if pour_arm and pour_arm != hold_arm else ("right" if hold_arm == "left" else "left")
+        pour_arm = _arm_named_for(text, ("pour", "bottle", "water")) or "right"
         plan += [
-            [{"skill": "pick_hold", "arm": hold_arm, "object": "mug"},
-             {"skill": "pick_lift", "arm": pour_arm, "object": "bottle"}],
+            [{"skill": "pick_lift", "arm": pour_arm, "object": "bottle"}],
             [{"skill": "pour", "arm": pour_arm, "into": "mug"}],
-            [{"skill": "return", "arm": pour_arm, "object": "bottle"},
-             {"skill": "place", "arm": hold_arm, "object": "mug"}],
+            [{"skill": "return", "arm": pour_arm, "object": "bottle"}],
         ]
-    elif wants("mug", "cup", "glass") and "mug_placed" not in done:
-        arm = _arm_named_for(text, ("mug", "cup", "glass")) or "left"
-        plan += [[{"skill": "pick_hold", "arm": arm, "object": "mug"}],
-                 [{"skill": "place", "arm": arm, "object": "mug"}]]
     plan.append([{"skill": "home", "arm": "left"}, {"skill": "home", "arm": "right"}])
     return validate(plan)
 

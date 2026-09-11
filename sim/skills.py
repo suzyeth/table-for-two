@@ -1,221 +1,279 @@
-"""Scripted manipulation skills for one SO-101 arm.
+"""Contact-only scripted skills for one SO-101 arm.
 
 Every skill is a generator that yields a 6-D joint target (5 arm joints plus
-the gripper) once per control step. Cartesian goals are converted to joints
-with IK at the moment the segment starts, so each segment reacts to where the
-objects actually are (important under randomised initial placement).
+the gripper) once per control step. Nothing is attached to the gripper: a skill
+places the open jaws around an object, closes past contact so the servo keeps
+squeezing, and from then on the object moves only because friction holds it.
+Cartesian goals are converted to joints with IK when each segment starts, from
+the actual object poses, so skills react to randomised placement and to any
+slip in the hand (``place`` measures where the object really sits in the hand).
+
+Moves between places go up to a transit height first, because the top-down
+reach of the SO-101 ends ~8 cm above the table, then across, then down.
 """
 import mujoco
 import numpy as np
-from scipy.optimize import minimize
 
-from sim.env import CONTROL_HZ, GRIPPER_CLOSED, GRIPPER_OPEN, TABLE_TOP_Z
-from sim.ik import DOWN
+from scene.build_scene import TABLE_TOP_Z, UTENSIL_HANDLE
+from sim.env import CONTROL_HZ, GRIPPER_OPEN, GRIPPER_SQUEEZE
+from sim.grasping import DOWN, PRE_HEIGHT, SITE_LOCAL, UP, horizontal, top_down_grasp
+from sim.ik import gripper_rotation
+from sim.pour import PourMixin
 
 MAX_JOINT_SPEED = 1.2  # rad/s for free-space moves
-SLOW_JOINT_SPEED = 0.5  # rad/s near objects
+SLOW_JOINT_SPEED = 0.4  # rad/s near and in contact with objects
 MIN_SEGMENT_STEPS = 6
-GRIP_STEPS = 8
+LINE_MIN_STEPS = 2
+GRIP_STEPS = 12
+SQUEEZE_SETTLE_STEPS = 8
 SETTLE_STEPS = 3
-CLEARANCE = 0.10  # hover height above grasp and place points (clears the open drawer front)
-
-# TCP height above the object origin when grasping, and object half heights.
-GRASP_Z = {"plate": 0.006, "mug": 0.03, "bottle": 0.03, "spoon": 0.004, "fork": 0.004}
-HALF_HEIGHT = {"plate": 0.004, "mug": 0.035, "bottle": 0.06, "spoon": 0.003, "fork": 0.003}
-PLACE_MARGIN = 0.004
-
-DRAWER_PULL = 0.10
-DRAWER_WAYPOINTS = 8
-
-POUR_TILT = np.deg2rad(75)
-POUR_HOLD_STEPS = int(1.2 * CONTROL_HZ)
-POUR_ABOVE_MUG = 0.05  # bottle tip height above the mug rim; lower and the tilted bottle hits the rim
-POUR_CORRECTIONS = 4  # closed-loop passes that fold the measured tip error back into the goal
-POUR_CORRECTION_GAIN = 0.8
-POUR_SETTLE_STEPS = 4
-BOTTLE_TIP = 0.06  # bottle origin to tip along its axis
-POUR_POS_SCALE = 0.01  # 1 cm tip error costs as much as...
-POUR_TILT_SCALE = np.deg2rad(5)  # ...5 degrees of missing tilt
-# (wrist_flex, wrist_roll) offsets used as optimiser seeds; the pour cost has local minima.
-POUR_SEEDS = [(flex, roll) for flex in (0.0, -0.8, 0.8, -1.4, 1.4) for roll in (0.0, 1.5, -1.5)]
+# Top-down reach tops out at 9 cm above the table 18-24 cm from the base and 4-6 cm
+# at 12 or 28 cm, so hands travel 6 cm up (above the plate, utensils and drawer).
+TRANSIT_TCP_Z = TABLE_TOP_Z + 0.06
+LIFT = 0.04
+SLIDE_HEIGHT = 0.004  # a sideways approach slides in this far above the grasp, then settles
+PLACE_ABOVE = 0.03
+PLACE_GAP = 0.003
+RETREAT = 0.03
+DRAWER_PULL = 0.100
+IK_POS_TOL = 0.004  # warn beyond this
+IK_ROT_TOL = np.deg2rad(4)
+IK_RETRY_POS = 0.0015  # retry with restarts beyond this
+IK_RETRY_ROT = np.deg2rad(2)
+# Height of each object's origin above the table when it rests there.
+REST_HEIGHT = {"plate": 0.0, "mug": 0.0, "bottle": 0.0, "spoon": UTENSIL_HANDLE[2], "fork": UTENSIL_HANDLE[2]}
 
 
 def smoothstep(s):
     return s * s * (3.0 - 2.0 * s)
 
 
-class ArmSkills:
+class ArmSkills(PourMixin):
+    free_speed = MAX_JOINT_SPEED
+    slow_speed = SLOW_JOINT_SPEED
+    squeeze_settle = SQUEEZE_SETTLE_STEPS
+
     def __init__(self, env, arm):
         self.env = env
         self.arm = arm
+        self.ik = env.ik[arm]
         self.cmd = env.home[arm].copy()
-        self.last_pour_cost = None
+        self.orient = {"approach": None}  # orientation of the last Cartesian segment
+        self.release_to = GRIPPER_OPEN  # jaw opening used when letting go of the current object
+        self.warnings = []
 
-    # -------------------------------------------------------- primitives
-    def _interp(self, goal, speed=MAX_JOINT_SPEED):
+    # ------------------------------------------------------- kinematics
+    def _qpos(self, q=None):
+        qpos = self.env.data.qpos.copy()
+        qpos[self.ik.qpos_adr] = self.cmd[:5] if q is None else q
+        return qpos
+
+    def frame(self, q=None):
+        """Gripper body (position, rotation) for arm joints ``q`` (default: the commanded ones)."""
+        scratch = self.ik.scratch
+        scratch.qpos[:] = self._qpos(q)
+        mujoco.mj_kinematics(self.env.model, scratch)
+        body = self.ik.gripper_body
+        return scratch.xpos[body].copy(), scratch.xmat[body].reshape(3, 3).copy()
+
+    def point_world(self, point, q=None):
+        """World position of a gripper-frame point (None = the TCP site) for joints ``q``."""
+        pos, rot = self.frame(q)
+        return pos + rot @ (SITE_LOCAL if point is None else point)
+
+    def held_point(self, obj):
+        """Origin of ``obj`` in gripper coordinates, from the actual simulation state."""
+        d = self.env.data
+        body = self.ik.gripper_body
+        return d.xmat[body].reshape(3, 3).T @ (self.env.object_frame(obj)[0] - d.xpos[body])
+
+    def solve(self, target, orient, restarts=False):
+        """IK from the commanded joints; retry with restarts if that lands off by more than a mm or two.
+
+        (A local solution a few mm off is not harmless: a grasp that stops 4 mm high catches
+        only the top edge of a handle.)
+        """
+        q, err = self.ik.solve(self._qpos(), target, restarts=restarts, **orient)
+        rot_err = self.ik.last_rot_err
+        if not restarts and (err > IK_RETRY_POS or rot_err > IK_RETRY_ROT):
+            q_alt, err_alt = self.ik.solve(self._qpos(), target, restarts=True, **orient)
+            if err_alt + 0.3 * self.ik.last_rot_err < err + 0.3 * rot_err:
+                q, err, rot_err = q_alt, err_alt, self.ik.last_rot_err
+        if err > IK_POS_TOL or rot_err > IK_ROT_TOL:
+            self.warnings.append(f"{self.arm} IK {err * 1000:.1f} mm / {np.degrees(rot_err):.1f} deg "
+                                 f"at {np.round(target, 3).tolist()}")
+        return q, err
+
+    # ------------------------------------------------------- primitives
+    def _interp(self, goal, speed=MAX_JOINT_SPEED, min_steps=MIN_SEGMENT_STEPS, settle=SETTLE_STEPS):
         start = self.cmd.copy()
         dist = float(np.max(np.abs(goal[:5] - start[:5])))
-        steps = max(MIN_SEGMENT_STEPS, int(np.ceil(dist / speed * CONTROL_HZ)))
+        steps = max(min_steps, int(np.ceil(dist / speed * CONTROL_HZ)))
         for i in range(1, steps + 1):
             self.cmd = start + (goal - start) * smoothstep(i / steps)
             yield self.cmd.copy()
+        for _ in range(settle):
+            yield self.cmd.copy()
+
+    def _to(self, q, grip=None, speed=MAX_JOINT_SPEED, min_steps=MIN_SEGMENT_STEPS, settle=SETTLE_STEPS):
+        goal = self.cmd.copy()
+        goal[:5] = q
+        if grip is not None:
+            goal[5] = grip
+        yield from self._interp(goal, speed, min_steps, settle)
+
+    def line(self, end, orient, steps=6, speed=SLOW_JOINT_SPEED, grip=None):
+        """Straight-line Cartesian move of the controlled point (``orient['point']``) to ``end``."""
+        start = self.point_world(orient.get("point"))
+        end = np.asarray(end, dtype=float)
+        turn = self._closing_turn(orient)
+        self.orient = orient
+        for k in range(1, steps + 1):
+            step_orient = orient if turn is None else {**orient, "closing": turn(k / steps)}
+            q, _ = self.solve(start + (end - start) * k / steps, step_orient)
+            yield from self._to(q, grip, speed, LINE_MIN_STEPS, settle=0)
         for _ in range(SETTLE_STEPS):
             yield self.cmd.copy()
 
-    def move(self, pos, approach=DOWN, grip=None, speed=MAX_JOINT_SPEED, roll=None):
-        """Move the TCP to ``pos`` (world frame) with the given approach axis."""
-        q, _ = self.env.ik[self.arm].solve(self.env.data.qpos, np.asarray(pos, dtype=float), approach)
-        goal = self.cmd.copy()
-        goal[:5] = q
-        if roll is not None:
-            goal[4] = roll
-        if grip is not None:
-            goal[5] = grip
-        yield from self._interp(goal, speed)
+    def _closing_turn(self, orient):
+        """For a top-down hand, s -> jaw direction turning the current jaws onto ``orient``'s by fraction s."""
+        if orient.get("approach") is None or orient.get("closing") is None:
+            return None
+        current_x = self.frame()[1][:, 0]
+        if abs(current_x[2]) > 0.2:  # hand not top-down yet: nothing sensible to interpolate
+            return None
+        current, target = horizontal(current_x), horizontal(orient["closing"])
+        angle = np.arctan2(np.cross(current, target)[2], current @ target)
+        if abs(angle) < 1e-3:
+            return None
 
-    def move_joints(self, q_arm, speed=MAX_JOINT_SPEED):
-        goal = self.cmd.copy()
-        goal[:5] = q_arm
-        yield from self._interp(goal, speed)
+        def at(fraction):
+            c, s = np.cos(angle * fraction), np.sin(angle * fraction)
+            return np.array([c * current[0] - s * current[1], s * current[0] + c * current[1], 0.0])
+        return at
 
-    def grip(self, value, intent=None):
-        """Ramp the gripper to ``value``; ``intent`` names the object a closing grip is meant for."""
-        if intent is not None:
-            self.env.set_grasp_intent(self.arm, intent)
+    def grip(self, value, steps=GRIP_STEPS):
         start = self.cmd.copy()
-        for i in range(1, GRIP_STEPS + 1):
+        for i in range(1, steps + 1):
             self.cmd = start.copy()
-            self.cmd[5] = start[5] + (value - start[5]) * i / GRIP_STEPS
+            self.cmd[5] = start[5] + (value - start[5]) * i / steps
             yield self.cmd.copy()
 
     def wait(self, steps):
         for _ in range(steps):
             yield self.cmd.copy()
 
+    def rise(self):
+        """Lift straight up to the transit height, keeping the current hand orientation."""
+        tcp_z = self.point_world(None)[2]
+        if tcp_z < TRANSIT_TCP_Z - 0.005:
+            here = self.point_world(self.orient.get("point"))
+            yield from self.line(here + UP * (TRANSIT_TCP_Z - tcp_z), self.orient, steps=4, speed=MAX_JOINT_SPEED)
+
+    def _tcp_above_point(self, orient):
+        """TCP height minus controlled-point height for a top-down hand with ``orient``."""
+        point = orient.get("point")
+        if point is None:
+            return 0.0
+        rot = gripper_rotation(DOWN, orient["closing"])
+        return float((rot @ (SITE_LOCAL - point))[2])
+
+    def transit(self, target, orient, grip=None):
+        """Move the controlled point to ``target``: up, across at transit height, down.
+
+        From high up (e.g. home, where the hand is not top-down and top-down poses are out
+        of reach) the move to the hover pose is a joint-space move; otherwise it is a
+        straight line at transit height.
+        """
+        yield from self.rise()
+        target = np.asarray(target, dtype=float)
+        hover = target.copy()
+        hover[2] = max(target[2], TRANSIT_TCP_Z - self._tcp_above_point(orient))
+        if self.point_world(None)[2] > TRANSIT_TCP_Z + 0.02:
+            q, _ = self.solve(hover, orient, restarts=True)
+            self.orient = orient
+            yield from self._to(q, grip, MAX_JOINT_SPEED)
+        else:
+            yield from self.line(hover, orient, steps=8, speed=MAX_JOINT_SPEED, grip=grip)
+        if hover[2] > target[2] + 1e-4:
+            yield from self.line(target, orient, steps=4, speed=MAX_JOINT_SPEED)
+
     def home(self):
+        yield from self.rise()
         yield from self._interp(self.env.home[self.arm].copy())
 
-    # ------------------------------------------------------------ skills
-    def pick(self, obj, offset=None):
-        """Top-down grasp of ``obj``; ``offset`` (world frame) shifts the grasp point along the object."""
-        shift = np.zeros(3) if offset is None else np.asarray(offset, dtype=float)
-        above = self.env.grasp_point(obj) + shift + [0.0, 0.0, GRASP_Z[obj] + CLEARANCE]
-        yield from self.move(above, grip=GRIPPER_OPEN)
-        grasp = self.env.grasp_point(obj) + shift + [0.0, 0.0, GRASP_Z[obj]]
-        yield from self.move(grasp, speed=SLOW_JOINT_SPEED)
-        yield from self.grip(GRIPPER_CLOSED, intent=obj)
-        yield from self.move(grasp + [0.0, 0.0, CLEARANCE], speed=SLOW_JOINT_SPEED)
+    # ----------------------------------------------------------- grasps
+    def _choose_orientation(self, grasp, camera_side=None):
+        """Top-down hand orientation for ``grasp``; symmetric grasps may close either way round.
 
-    def place(self, obj, xy):
-        """Lower the held object so its origin lands on ``xy``, then release."""
-        offset = self.env.grasp_point(obj) - self.env.tcp(self.arm)  # object origin relative to TCP
-        centre_z = TABLE_TOP_Z + HALF_HEIGHT[obj] + PLACE_MARGIN
-        tcp_goal = np.array([xy[0] - offset[0], xy[1] - offset[1], centre_z - offset[2]])
-        yield from self.move(tcp_goal + [0.0, 0.0, CLEARANCE])
-        yield from self.move(tcp_goal, speed=SLOW_JOINT_SPEED)
-        yield from self.grip(GRIPPER_OPEN)
-        yield from self.move(tcp_goal + [0.0, 0.0, CLEARANCE], speed=SLOW_JOINT_SPEED)
-
-    def pick_place(self, obj, xy):
-        yield from self.pick(obj)
-        yield from self.place(obj, xy)
-
-    def open_drawer(self):
-        """Grip the handle from the front (approach +x) and pull straight out."""
-        into_cabinet = np.array([1.0, 0.0, 0.0])
-        handle = self.env.grasp_point("drawer")
-        yield from self.move(handle + [-CLEARANCE, 0.0, 0.0], approach=into_cabinet, grip=GRIPPER_OPEN)
-        yield from self.move(handle + [-0.004, 0.0, 0.0], approach=into_cabinet, speed=SLOW_JOINT_SPEED)
-        yield from self.grip(GRIPPER_CLOSED, intent="drawer")
-        start = self.env.tcp(self.arm)
-        for i in range(1, DRAWER_WAYPOINTS + 1):
-            waypoint = start + [-DRAWER_PULL * i / DRAWER_WAYPOINTS, 0.0, 0.0]
-            yield from self.move(waypoint, approach=into_cabinet, speed=SLOW_JOINT_SPEED)
-        yield from self.grip(GRIPPER_OPEN)
-        # Back straight out with the same wrist attitude, then rise; switching
-        # attitude while still at the handle makes the wrist flip into the table.
-        yield from self.move(self.env.tcp(self.arm) + [-0.04, 0.0, 0.0], approach=into_cabinet,
-                             speed=SLOW_JOINT_SPEED)
-        yield from self.move(self.env.tcp(self.arm) + [0.0, 0.0, CLEARANCE], approach=into_cabinet,
-                             speed=SLOW_JOINT_SPEED)
-
-    def lift_to(self, pos, roll=None):
-        yield from self.move(pos, roll=roll)
-
-    # -------------------------------------------------------------- pouring
-    def _held_pose(self, obj, q_arm):
-        """Forward kinematics of a welded object for arm joints ``q_arm``: (origin, rotation)."""
-        env, m = self.env, self.env.model
-        ik = env.ik[self.arm]
-        d = ik.scratch
-        d.qpos[:] = env.data.qpos
-        d.qpos[ik.qpos_adr] = q_arm
-        mujoco.mj_kinematics(m, d)
-        eq = env.eq_ids[(self.arm, obj)]
-        body = env.gripper_body[self.arm]
-        origin = d.xpos[body] + d.xmat[body].reshape(3, 3) @ m.eq_data[eq, 3:6]
-        quat, rot = np.zeros(4), np.zeros(9)
-        mujoco.mju_mulQuat(quat, d.xquat[body], m.eq_data[eq, 6:10])
-        mujoco.mju_quat2Mat(rot, quat)
-        return origin, rot.reshape(3, 3)
-
-    def _pour_joints(self, tip_goal):
-        """Arm joints that put the held bottle's tip at ``tip_goal`` tilted by at least POUR_TILT."""
-        ik = self.env.ik[self.arm]
-        bounds = list(zip(ik.lo, ik.hi))
-
-        def cost(q):
-            origin, rot = self._held_pose("bottle", q)
-            tip = origin + rot @ np.array([0.0, 0.0, BOTTLE_TIP])
-            tilt = np.arccos(np.clip(rot[2, 2], -1.0, 1.0))
-            pos_term = np.sum((tip - tip_goal) ** 2) / POUR_POS_SCALE ** 2
-            tilt_term = (max(0.0, POUR_TILT - tilt) / POUR_TILT_SCALE) ** 2
-            return pos_term + tilt_term
-
-        start = self.env.arm_qpos(self.arm)[:5]
-        best = None
-        for flex_offset, roll_offset in POUR_SEEDS:
-            seed = start.copy()
-            seed[3] += flex_offset
-            seed[4] += roll_offset
-            seed = np.clip(seed, ik.lo, ik.hi)
-            result = minimize(cost, seed, method="L-BFGS-B", bounds=bounds)
-            if best is None or result.fun < best.fun:
-                best = result
-            if best.fun < 0.05:  # tip within ~2 mm and fully tilted: good enough
-                break
-        self.last_pour_cost = float(best.fun)
-        return best.x
-
-    def _bottle_tip(self):
-        """Current world position of the bottle tip (actual simulation state)."""
-        body = self.env.body_ids["bottle"]
-        rot = self.env.data.xmat[body].reshape(3, 3)
-        return self.env.data.xpos[body] + rot @ np.array([0.0, 0.0, BOTTLE_TIP])
-
-    def pour_into(self, target_obj="mug"):
-        """Bring the held bottle beside ``target_obj``, tilt its tip over the rim, hold, straighten.
-
-        The arm sags under the bottle's weight and the held mug drifts, so after
-        the open-loop move the tip error is measured and integrated into the goal
-        for a few correction passes before holding the pour.
+        ``camera_side`` (world direction) picks, for a symmetric grasp, the way round that puts
+        the hand's jaw-width axis - the side the wrist-camera mount sticks out 4-8 cm - that way.
         """
-        mug = self.env.grasp_point(target_obj)
-        side = np.sign(mug[1] - self.env.tcp(self.arm)[1]) or 1.0
-        rim_offset = np.array([0.0, 0.0, HALF_HEIGHT[target_obj] + POUR_ABOVE_MUG])
-        tip_goal = mug + rim_offset
-        yield from self.move(tip_goal + [0.0, -side * 0.07, 0.06])
-        upright = self.cmd[:5].copy()
-        yield from self.move_joints(self._pour_joints(tip_goal), speed=SLOW_JOINT_SPEED)
-        correction = np.zeros(3)
-        for _ in range(POUR_CORRECTIONS):
-            tip_goal = self.env.grasp_point(target_obj) + rim_offset
-            correction += POUR_CORRECTION_GAIN * (tip_goal - self._bottle_tip())
-            yield from self.move_joints(self._pour_joints(tip_goal + correction), speed=SLOW_JOINT_SPEED)
-            yield from self.wait(POUR_SETTLE_STEPS)
-        yield from self.wait(POUR_HOLD_STEPS)
-        yield from self.move_joints(upright, speed=SLOW_JOINT_SPEED)
+        options = [grasp.closing] + ([-grasp.closing] if grasp.symmetric else [])
+        if camera_side is not None and len(options) > 1:
+            options = [c for c in options if np.cross(UP, c) @ np.asarray(camera_side) > 0] or options
+        best = None
+        for closing in options:
+            orient = {"approach": DOWN, "closing": closing, "point": grasp.pinch}
+            q, err = self.ik.solve(self._qpos(), grasp.centre, restarts=True, **orient)
+            cost = err + 0.3 * self.ik.last_rot_err + 0.01 * float(np.abs(q - self.cmd[:5]).sum())
+            if best is None or cost < best[0]:
+                best = (cost, orient)
+        return best[1]
+
+    def pick(self, obj, along=0.0, toward=None, lift=LIFT, approach_from=None, camera_side=None):
+        """Top-down contact grasp: descend around ``obj``, squeeze past contact, lift ``lift``.
+
+        ``approach_from`` (world offset) makes the hand line up that far beside the grasp first
+        and slide in over it, e.g. to stay clear of the other hand during a hand-over;
+        ``camera_side`` chooses which way a symmetric grasp faces (see _choose_orientation).
+        """
+        grasp = top_down_grasp(self.env, self.arm, obj, along, toward)
+        orient = self._choose_orientation(grasp, camera_side)
+        self.release_to = grasp.open_to
+        above = grasp.centre + UP * PRE_HEIGHT
+        if approach_from is not None:
+            # Line up beside the grasp just above its height and slide the open jaws in along
+            # the object (top-down reach ends ~9 cm up, so there is no room to come from above).
+            level = grasp.centre + UP * SLIDE_HEIGHT
+            yield from self.transit(level + np.asarray(approach_from, dtype=float), orient, grip=grasp.open_to)
+            yield from self.line(level, orient, steps=6)
+        else:
+            yield from self.transit(above, orient, grip=grasp.open_to)
+        # Re-measure just before closing in: the object may have moved (e.g. sagging in the
+        # other hand during a hand-over).
+        centre = top_down_grasp(self.env, self.arm, obj, along, toward).centre
+        yield from self.line(centre, orient, steps=6)
+        yield from self.grip(GRIPPER_SQUEEZE)
+        yield from self.wait(SQUEEZE_SETTLE_STEPS)
+        if lift > 0:
+            yield from self.line(centre + UP * lift, orient, steps=4)
+
+    def carry(self, obj, goal, closing=None):
+        """Move the held object's origin to ``goal`` with the hand top-down (optionally re-oriented)."""
+        if closing is None:
+            closing = horizontal(self.frame()[1][:, 0])
+        orient = {"approach": DOWN, "closing": np.asarray(closing, dtype=float), "point": self.held_point(obj)}
+        yield from self.transit(goal, orient)
+
+    def place(self, obj, xy, closing=None):
+        """Set the held object down with its origin on ``xy``, open, and back off upward."""
+        rest = np.array([xy[0], xy[1], TABLE_TOP_Z + REST_HEIGHT[obj] + PLACE_GAP])
+        yield from self.carry(obj, rest + UP * PLACE_ABOVE, closing)
+        yield from self.line(rest, self.orient, steps=5)
+        yield from self.release_and_retreat()
 
     def release_and_retreat(self):
-        yield from self.grip(GRIPPER_OPEN)
-        yield from self.move(self.env.tcp(self.arm) + [0.0, 0.0, 0.05], speed=SLOW_JOINT_SPEED)
+        """Open only as far as on the way in (a wide-open jaw can shove what it just let go)."""
+        yield from self.grip(self.release_to)
+        yield from self.wait(2 * SETTLE_STEPS)
+        here = self.point_world(self.orient.get("point"))
+        yield from self.line(here + UP * RETREAT, self.orient, steps=3)
+
+    def open_drawer(self):
+        """Pinch the bar handle top-down and pull the drawer straight out."""
+        yield from self.pick("drawer", lift=0)
+        orient = self.orient
+        here = self.point_world(orient["point"])
+        yield from self.line(here + np.array([-DRAWER_PULL, 0.0, 0.0]), orient, steps=10)
+        yield from self.release_and_retreat()
