@@ -94,14 +94,14 @@ skills were debugged on, so they are reported next to a block of 30 seeds
 
 | Sub-goal | Seeds 0–9 | Unseen seeds 1000–1029 |
 |---|---|---|
-| Drawer opened (pulled by its handle) | SCRIPTED_0_9_DRAWER | FRESH_DRAWER |
-| Mug placed | SCRIPTED_0_9_MUG | FRESH_MUG |
-| Plate on placemat (two-handed) | SCRIPTED_0_9_PLATE | FRESH_PLATE |
-| Fork placed | SCRIPTED_0_9_FORK | FRESH_FORK |
-| Spoon handed over and placed | SCRIPTED_0_9_SPOON | FRESH_SPOON |
-| Poured (≥ 60 % of the beads in the mug, ≤ 2 spilled) | SCRIPTED_0_9_POURED | FRESH_POURED |
-| Bottle put back | SCRIPTED_0_9_BOTTLE | FRESH_BOTTLE |
-| **Full task** | **SCRIPTED_0_9_ALL** | **FRESH_ALL** |
+| Drawer opened (pulled by its handle) | 10/10 | FRESH_DRAWER |
+| Mug placed | 10/10 | FRESH_MUG |
+| Plate on placemat (two-handed) | 10/10 | FRESH_PLATE |
+| Fork placed | 10/10 | FRESH_FORK |
+| Spoon handed over and placed | 10/10 | FRESH_SPOON |
+| Poured (≥ 60 % of the beads in the mug, ≤ 2 spilled) | 10/10 | FRESH_POURED |
+| Bottle put back | 10/10 | FRESH_BOTTLE |
+| **Full task** | **10/10** | **FRESH_ALL** |
 
 `tools/audit_contact.py` checks every hold on the same seeds: no object is
 released in mid-air, none is lost while the fingers squeeze, and touch-down

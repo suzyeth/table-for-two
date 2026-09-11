@@ -36,6 +36,7 @@ PLACE_ABOVE = 0.03
 TOUCH_STEP = 0.0015  # set-down increment; with TOUCH_MIN_STEPS control steps each, ~1.5 cm/s
 TOUCH_MIN_STEPS = 2
 TOUCH_OVERSHOOT = 0.006  # keep lowering this far past the nominal rest height before giving up
+PRESS_STEPS = 2  # extra descent steps after the first contact (a graze is not a rest)
 RETREAT = 0.03
 RELEASE_BACKOFF = 0.003  # after opening, move the fixed finger this far off the object before lifting
 DRAWER_PULL = 0.100
@@ -300,9 +301,13 @@ class ArmSkills(PourMixin):
         floor = np.asarray(rest, dtype=float) - UP * TOUCH_OVERSHOOT
         distance = float(np.linalg.norm(floor - here))
         steps = max(1, int(np.ceil(distance / TOUCH_STEP)))
+        pressed = 0
         for k in range(1, steps + 1):
             if self.env.supported(obj):
-                break
+                # First touch can be a graze; keep lowering a step or two so it really sits.
+                if pressed >= PRESS_STEPS:
+                    break
+                pressed += 1
             q, _ = self.solve(here + (floor - here) * k / steps, orient)
             yield from self._to(q, None, SLOW_JOINT_SPEED, TOUCH_MIN_STEPS, settle=0)
         if not self.env.supported(obj):

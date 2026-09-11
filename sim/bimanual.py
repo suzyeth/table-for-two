@@ -14,7 +14,7 @@ import numpy as np
 
 from scene.build_scene import TABLE_TOP_Z
 from sim.grasping import DOWN, UP, plate_wall_grasp
-from sim.skills import REST_HEIGHT, TOUCH_OVERSHOOT, TOUCH_STEP
+from sim.skills import PRESS_STEPS, REST_HEIGHT, TOUCH_OVERSHOOT, TOUCH_STEP
 
 CARRY_LIFT = 0.04
 CARRY_ABOVE = 0.03  # height above the rest pose where the shared descent starts
@@ -77,9 +77,12 @@ def carry_together(env, skills, obj, target_xy, grip_dirs):
     # Touch-sensing descent, shared by both hands.
     floor = rest - UP * TOUCH_OVERSHOOT
     count = max(1, int(np.ceil(np.linalg.norm(above - floor) / TOUCH_STEP)))
+    pressed = 0
     for k in range(1, count + 1):
         if env.supported(obj):
-            break
+            if pressed >= PRESS_STEPS:
+                break
+            pressed += 1
         yield from _shared_step(skills, orients, above + (floor - above) * k / count, TOUCH_TICKS)
     if not env.supported(obj):
         for sk in skills.values():
