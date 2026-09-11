@@ -17,8 +17,12 @@ from scene.build_scene import BOTTLE, MUG, TABLE_TOP_Z
 from sim.env import CONTROL_HZ, GRIPPER_OPEN, GRIPPER_SQUEEZE
 from sim.grasping import FIXED_PAD_X, PAD_CLEARANCE, SITE_LOCAL, UP, horizontal
 
-SIDE_HEIGHTS = (0.030, 0.024, 0.038)  # grasp centre above the bottle base
-SIDE_OVERLAPS = (0.016, 0.012, 0.020)  # fingertips this far past the bottle axis
+# Grasp centre above the bottle base, preferred first. Gripping higher reaches bottles that
+# stand a little closer to the arm (a jaws-horizontal grip near the table needs >= ~30 cm);
+# at 5 cm the fingers still end ~1 cm below the 7 cm mouth. With 3.0-3.8 cm only, 28/30
+# randomised seeds were reachable; with these, 30/30.
+SIDE_HEIGHTS = (0.030, 0.024, 0.038, 0.044, 0.050)
+SIDE_OVERLAPS = (0.016, 0.012, 0.020, 0.008)  # fingertips this far past the bottle axis
 SIDE_PRE = 0.03  # pinch point this far above the mouth before descending
 BOTTLE_LIFT = 0.10
 MIN_RADIAL_APPROACH = 0.3  # fingers point away from the arm base
