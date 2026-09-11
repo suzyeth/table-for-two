@@ -53,8 +53,10 @@ so the servo keeps squeezing, and move. Getting there took measuring the robot:
 | Drawer | top-down pinch on the bar pull, fixed finger on the arm side, moving jaw dropped into the gap at a set opening | closing the other way round needs more wrist roll than the arm has; opening wider lands the finger on the drawer front |
 | Utensils | top-down pinch on a 10 mm-square handle, jaws stopping 1 mm above the surface | the jaws' collision bodies end 8 mm below the tool point; a flat 5 mm handle leaves the pads 1–2 mm to squeeze |
 | Hand-over | both wrist-camera mounts face away from the other hand, spoon held 30° off crosswise, grips 5.6 cm apart | found by a search over angle, grip points and height, measuring the distance between the two arms' collision bodies; straight crosswise they touch |
-| Plate | pinch on the wall nearest the arm, moving jaw inside, 3 mm above the floor | a jaw that touches the plate floor jams before it closes |
-| Mug | top-down across the body just below the rim, handle beside the jaws | — |
+| Plate | carried by **both arms**, each pinching an opposite wall (thin fixed finger inside, moving jaw outside), moving in lockstep | one hand on one wall leaves the plate hanging 6–8° (its centre of mass is 4.5 cm from the pinch); with two hands it stays within 2.5° |
+| Mug | top-down across the body just below the rim, handle beside the jaws, tipped level while carried | — |
+| Utensils (one arm) | gripped over their centre of mass | gripped at the handle end the fork sagged 12–17° and slid |
+| Every set-down | lowered in 1.5 mm steps until the object touches a support, then the fingers open and slide off the object before lifting | releasing at a computed height dropped the fork 2.8 cm at 0.7 m/s; lifting straight after opening let two hands inside the plate lift it and fling it |
 
 Reach shaped the layout: a top-down hand reaches at most 9 cm above the table
 (18–24 cm from the base), a jaws-horizontal hand reaches the table only 30 cm
@@ -117,13 +119,19 @@ network will be filled in here from `policy/rollout.py` and `bench/benchmark.py`
 
 ## Run it
 
+One command sets everything up (virtual environment, pinned dependencies from
+`requirements.txt`, PyTorch, the SO-101 model, the scene) and runs the tests:
+
 ```bash
-python -m venv .venv
-.venv\Scripts\pip install mujoco "lerobot[dataset,training]==0.6.1" openvino openvino-genai nncf imageio imageio-ffmpeg scipy
-.venv\Scripts\pip install --force-reinstall --no-deps torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128   # CUDA build for training
-git clone --depth 1 https://github.com/google-deepmind/mujoco_menagerie third_party/mujoco_menagerie
-.venv\Scripts\python scene\build_scene.py                     # compose the MJCF scene
+bash scripts/install.sh                                         # Ubuntu 24.04 / Linux  (add --cuda for GPU training)
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1    # Windows              (add -Cuda for GPU training)
+```
+
+Then (Windows paths shown; on Linux use `.venv/bin/python`):
+
+```bash
 .venv\Scripts\python -m sim.task --seeds 0 1 2 3 4 5 6 7 8 9    # scripted 10-seed evaluation
+.venv\Scripts\python -m tools.audit_contact --seeds 0 1 2       # balance / set-down / drop audit
 .venv\Scripts\python -m tools.trace_stage --stage 4 --object spoon   # step through one stage with close-ups
 .venv\Scripts\python -m planner.download_model                 # Qwen2.5-1.5B INT4 OpenVINO IR
 .venv\Scripts\python -m planner.planner "Set the table and pour a drink"

@@ -1,0 +1,15 @@
+# Versions this project was built and tested with (Python 3.12).
+# PyTorch is installed separately by scripts/install.* (CPU or CUDA build).
+mujoco==3.13.0
+lerobot[dataset,training]==0.6.1
+openvino==2026.3.1
+openvino-genai==2026.3.1.0
+nncf==3.3.0
+numpy==2.2.6
+scipy==1.18.1
+pillow==12.3.0
+imageio==2.37.4
+imageio-ffmpeg==0.6.0
+requests==2.34.2
+piper-tts==1.8.0
+pytest==9.1.1
