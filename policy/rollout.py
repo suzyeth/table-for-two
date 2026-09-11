@@ -64,21 +64,36 @@ def stage_done(env, stage, elapsed_s):
     return all(checks)
 
 
-def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None):
+def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head=None):
     """Drive one stage with the policy; True if its predicate holds, and still holds after
     the arms have been held still for CONFIRM_SECONDS (so a bead splash or a plate that is
-    about to tip over does not count)."""
+    about to tip over does not count).
+
+    With ``head`` (a stage-completion head, policy/stage_head.py) the *policy side* decides
+    when the stage is over: the loop ends when the head has said "done" for its streak, and
+    the oracle predicate is then used only to score that decision. Without it the oracle
+    both ends the stage and scores it.
+    """
     onehot = subtask_onehot(stage_index_in_vocab)
     policy.reset()
+    if head is not None:
+        head.reset()
     steps = int(STAGE_TIMEOUT_S * 20 / RECORD_EVERY)
     for k in range(steps):
         images = {f"observation.images.{cam}": env.render(cam, IMAGE_SIZE) for cam in CAMERAS}
-        action = policy.select_action(env.joint_state(), onehot, images)
+        state = env.joint_state()
+        action = policy.select_action(state, onehot, images)
         for _ in range(RECORD_EVERY):  # dataset is 10 Hz, control loop is 20 Hz
             env.step(action)
         if frames is not None:
             frames.append(env.render("operator"))
         elapsed = (k + 1) * RECORD_EVERY / 20
+        if head is not None:
+            head.done(state, onehot, images)
+            if head.fired:
+                env.hold(CONFIRM_SECONDS)
+                return stage_done(env, stage, elapsed + CONFIRM_SECONDS)
+            continue
         if stage_done(env, stage, elapsed):
             env.hold(CONFIRM_SECONDS)
             if stage_done(env, stage, elapsed + CONFIRM_SECONDS):
@@ -92,7 +107,7 @@ def run_stage_scripted(env, executor, stage):
     executor.run([stage])
 
 
-def evaluate(policy, seeds, plan, mode, video_frames=None):
+def evaluate(policy, seeds, plan, mode, video_frames=None, head=None):
     env = DinnerTableEnv(obs_cameras=())
     executor = Executor(env)
     per_seed = []
@@ -105,7 +120,7 @@ def evaluate(policy, seeds, plan, mode, video_frames=None):
             signature = stage_signature(stage)
             if signature not in SUBTASK_VOCAB:
                 raise ValueError(f"stage '{signature}' was never demonstrated; the policy cannot run it")
-            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(signature), video_frames)
+            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(signature), video_frames, head)
             assisted = False
             if not ok and mode == "hybrid":
                 run_stage_scripted(env, executor, stage)
@@ -127,7 +142,7 @@ def evaluate(policy, seeds, plan, mode, video_frames=None):
     return per_seed
 
 
-def evaluate_stagewise(policy, seeds, plan):
+def evaluate_stagewise(policy, seeds, plan, head=None):
     """Per-skill success: script every earlier stage, then let the policy do just this one.
 
     Chained rollouts hide which skills the policy has learned, because one failed
@@ -146,7 +161,7 @@ def evaluate_stagewise(policy, seeds, plan):
             executor.run(plan[:index])
             for arm in ARMS:
                 executor.skills[arm].cmd = env.data.ctrl[env.act_idx[arm]].copy()
-            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(names[index]))
+            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(names[index]), head=head)
             wins[names[index]] += ok
         print(f"seed {seed}: cumulative per-stage wins {wins}")
     env.close()
@@ -180,6 +195,9 @@ def main():
     parser.add_argument("--device", default="CPU")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)))
     parser.add_argument("--mode", choices=("policy", "hybrid"), default="hybrid")
+    parser.add_argument("--switch", choices=("oracle", "head"), default="oracle",
+                        help="who ends a stage: the simulator oracle, or the policy's stage-completion head")
+    parser.add_argument("--head", type=Path, default=ROOT / "models" / "stage_head" / "stage_head_int8.xml")
     parser.add_argument("--stagewise", action="store_true",
                         help="score each stage separately, starting it from a scripted state")
     parser.add_argument("--plan", type=Path, help="JSON plan (e.g. from the planner); default plan otherwise")
@@ -189,17 +207,21 @@ def main():
 
     plan = json.loads(args.plan.read_text(encoding="utf-8")) if args.plan else DEFAULT_PLAN
     policy = OVActPolicy(args.policy, args.checkpoint, device=args.device)
+    head = None
+    if args.switch == "head":
+        from policy.stage_head import OVStageHead
+        head = OVStageHead(args.head, device=args.device)
     if args.stagewise:
-        per_stage = evaluate_stagewise(policy, args.seeds, plan)
-        report = {"policy": str(args.policy), "mode": "stagewise", "seeds": args.seeds, "per_stage_success": per_stage,
+        per_stage = evaluate_stagewise(policy, args.seeds, plan, head)
+        report = {"policy": str(args.policy), "mode": "stagewise", "switch": args.switch, "seeds": args.seeds, "per_stage_success": per_stage,
                   "policy_infer_ms_mean": round(float(np.mean(policy.infer_ms)), 3) if policy.infer_ms else None}
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")
         print(json.dumps(report, indent=1))
         return
     frames = [] if args.video else None
-    per_seed = evaluate(policy, args.seeds, plan, args.mode, frames)
-    report = {"policy": str(args.policy), "mode": args.mode, "seeds": args.seeds,
+    per_seed = evaluate(policy, args.seeds, plan, args.mode, frames, head)
+    report = {"policy": str(args.policy), "mode": args.mode, "switch": args.switch, "seeds": args.seeds,
               "summary": summarise(per_seed, policy), "episodes": per_seed}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")

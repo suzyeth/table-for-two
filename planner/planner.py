@@ -15,8 +15,10 @@ passes two checks before execution:
     the bottle in hand and the mug set down in its place, no placing something
     that is not held, utensils only after the drawer is open, both hands empty
     at the end).
-Errors are fed back to the model for one retry; remaining bad steps are
-dropped; if nothing sensible is left, a keyword planner builds the plan.
+Missing preconditions are filled in deterministically (``complete``: the mug
+before a pour, the bottle lifted and returned, the drawer before a utensil) and
+logged; other errors are fed back to the model for one retry; remaining bad
+steps are dropped; if nothing sensible is left, a keyword planner builds the plan.
 
 Run:  .venv\\Scripts\\python.exe -m planner.planner "Open the drawer and set the plate" --device CPU
 """
@@ -79,7 +81,8 @@ Rules:
 - Use the arm the user names. Otherwise left handles the drawer and fork, right handles the mug and
   the bottle, the plate is carried with both hands (bimanual_place), and the spoon goes from left to
   right with a handoff.
-- Only include what the instruction asks for, skip steps listed as done, end with "home left ; home right".
+- Only include what the instruction asks for - a short request gets a short plan. Skip steps listed as done.
+  End with "home left ; home right".
 Write only the plan lines, nothing else."""
 
 EXAMPLE_INSTRUCTION = ("Carry the plate to the placemat with both hands, open the drawer and put the mug in "
@@ -92,6 +95,13 @@ pour right mug
 return right bottle
 handoff spoon left right
 home left ; home right"""
+# Short requests, so the model does not copy the full example for every instruction.
+SHORT_EXAMPLES = (
+    ("Open the drawer.", "open_drawer left\nhome left ; home right"),
+    ("Pour me some water.", "pick_place right mug\npick_lift right bottle\npour right mug\nreturn right bottle\n"
+                            "home left ; home right"),
+    ("Put the cup in its place.", "pick_place right mug\nhome left ; home right"),
+)
 
 
 class PlanValidationError(ValueError):
@@ -122,6 +132,10 @@ def parse_plan_text(text):
                 raise PlanValidationError(f"'{skill}' needs {len(names)} argument(s): {line}")
             if skill == "pour" and tokens[2] == "bottle":
                 tokens[2] = "mug"  # the model sometimes names what it pours from, not into
+            if skill == "pick_place" and tokens[2] == "bottle":
+                skill = "pick_lift"  # "pick up the bottle" is a lift, not a placement
+            if skill == "return" and tokens[2] != "bottle":
+                continue  # only the bottle goes back; a stray "return mug" is dropped
             stage.append({"skill": skill, **dict(zip(names, tokens[1:]))})
         if stage:
             plan.append(stage)
@@ -232,6 +246,76 @@ def check_semantics(plan, scene_state=None):
     return problems
 
 
+def _has(plan, skill, obj=None, before=None):
+    for s, stage in enumerate(plan):
+        if before is not None and s >= before:
+            break
+        for sub in stage:
+            if sub["skill"] == skill and (obj is None or sub.get("object") == obj):
+                return True
+    return False
+
+
+def complete(plan, scene_state=None):
+    """Insert the mandatory preconditions a plan leaves out, and drop exact duplicates.
+
+    A small model often writes the goal without its set-up: "pour right mug" with no bottle in
+    hand, a utensil with the drawer still shut, or the same subtask twice. Filling these in is
+    deterministic table-setting knowledge (you cannot pour from a bottle you have not picked up),
+    and every insertion is logged in the returned list.
+    """
+    done = set((scene_state or {}).get("done", []))
+    plan = [list(stage) for stage in plan]
+    notes = []
+    # Duplicates: keep the first occurrence of an identical subtask.
+    seen, deduped = set(), []
+    for stage in plan:
+        kept = []
+        for sub in stage:
+            key = json.dumps(sub, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                kept.append(sub)
+            else:
+                notes.append(f"dropped duplicate {sub}")
+        if kept:
+            deduped.append(kept)
+    plan = deduped
+    # Utensils need the drawer open.
+    first_utensil = next((s for s, stage in enumerate(plan) for sub in stage
+                          if sub.get("object") in UTENSILS and sub["skill"] in ("pick_place", "handoff")), None)
+    if first_utensil is not None and "drawer_open" not in done and not _has(plan, "open_drawer", before=first_utensil + 1):
+        plan.insert(first_utensil, [{"skill": "open_drawer", "arm": "left"}])
+        notes.append("inserted open_drawer before the first utensil")
+    # Pouring needs the mug in place, the bottle in hand, and the bottle put back.
+    pour = next(((s, sub) for s, stage in enumerate(plan) for sub in stage if sub["skill"] == "pour"), None)
+    if pour is not None:
+        s, sub = pour
+        arm, other = sub["arm"], "left" if sub["arm"] == "right" else "right"
+        if "mug_placed" not in done and not _has(plan, "pick_place", "mug", before=s):
+            plan.insert(s, [{"skill": "pick_place", "arm": other, "object": "mug"}])
+            notes.append("inserted pick_place mug before pouring")
+            s += 1
+        if not _has(plan, "pick_lift", "bottle", before=s):
+            plan.insert(s, [{"skill": "pick_lift", "arm": arm, "object": "bottle"}])
+            notes.append("inserted pick_lift bottle before pouring")
+            s += 1
+        if not _has(plan, "return", "bottle"):
+            plan.insert(s + 1, [{"skill": "return", "arm": arm, "object": "bottle"}])
+            notes.append("inserted return bottle after pouring")
+    # A lifted bottle that is never poured or returned goes back.
+    if _has(plan, "pick_lift", "bottle") and not _has(plan, "return", "bottle"):
+        arm = next(sub["arm"] for stage in plan for sub in stage if sub["skill"] == "pick_lift")
+        plan.append([{"skill": "return", "arm": arm, "object": "bottle"}])
+        notes.append("inserted return bottle")
+    # Finish at home.
+    if not any(sub["skill"] == "home" for sub in plan[-1]):
+        plan = [stage for stage in plan if not all(sub["skill"] == "home" for sub in stage)]
+        plan.append([{"skill": "home", "arm": "left"}, {"skill": "home", "arm": "right"}])
+        notes.append("appended home")
+    return plan, notes
+
+
 def repair(plan, scene_state=None):
     """Drop subtasks flagged by check_semantics until the plan is clean; None if that fails."""
     plan = [list(stage) for stage in plan]
@@ -270,10 +354,12 @@ def keyword_plan(instruction, scene_state=None):
         return any(re.search(rf"\b{w}", text) for w in words)
 
     plan = []
-    utensils = [u for u in UTENSILS if wants(u, "cutlery", "utensil") and f"{u}_placed" not in done]
+    whole_table = wants("set the table", "whole table", "lay the table", "everything", "full table")
+    utensils = [u for u in UTENSILS if (whole_table or wants(u, "cutlery", "utensil")) and f"{u}_placed" not in done]
     if (wants("drawer") or utensils) and "drawer_open" not in done:
         plan.append([{"skill": "open_drawer", "arm": _arm_named_for(text, ("drawer",)) or "left"}])
-    mug_wanted = wants("mug", "cup", "glass", "pour", "water") and "mug_placed" not in done
+    mug_wanted = (whole_table or wants("mug", "cup", "glass", "pour", "water", "drink", "serve")) \
+        and "mug_placed" not in done
     if mug_wanted:
         plan.append([{"skill": "pick_place", "arm": _arm_named_for(text, ("mug", "cup", "glass")) or "right",
                       "object": "mug"}])
@@ -287,9 +373,9 @@ def keyword_plan(instruction, scene_state=None):
             plan.append([{"skill": "handoff", "object": utensil, "giver": giver, "receiver": receiver}])
         else:
             plan.append([{"skill": "pick_place", "arm": "left", "object": utensil}])
-    if wants("plate", "dish") and "plate_placed" not in done:
-        plan.append([{"skill": "bimanual_place", "object": "plate"}])
-    if wants("pour", "water"):
+    if (whole_table or wants("plate", "dish")) and "plate_placed" not in done:
+        plan.insert(0, [{"skill": "bimanual_place", "object": "plate"}])  # the plate goes first (drawer shut)
+    if whole_table or wants("pour", "water", "drink", "serve"):
         pour_arm = _arm_named_for(text, ("pour", "bottle", "water")) or "right"
         plan += [
             [{"skill": "pick_lift", "arm": pour_arm, "object": "bottle"}],
@@ -318,7 +404,8 @@ class Planner:
 
     def _prompt(self, instruction, scene_state, feedback=None):
         state = json.dumps(scene_state or {"done": []})
-        prompt = (f"Example instruction: {EXAMPLE_INSTRUCTION}\nExample plan:\n{EXAMPLE_PLAN_TEXT}\n\n"
+        shorts = "".join(f"Example instruction: {text}\nExample plan:\n{plan}\n\n" for text, plan in SHORT_EXAMPLES)
+        prompt = (f"Example instruction: {EXAMPLE_INSTRUCTION}\nExample plan:\n{EXAMPLE_PLAN_TEXT}\n\n{shorts}"
                   f"Scene state: {state}\nInstruction: {instruction}\nPlan:")
         if feedback:
             prompt += f"\n(Your previous plan was rejected: {feedback}. Write a corrected plan.)"
@@ -349,8 +436,12 @@ class Planner:
                 feedback = str(exc)
                 info["errors"].append(feedback)
                 continue
+            parsed, notes = complete(parsed, scene_state)
+            info["completed"] = notes
             problems = check_semantics(parsed, scene_state)
             if not problems:
+                if notes:
+                    info["source"] = "llm_completed"
                 return parsed, info
             last_parsed = parsed
             feedback = "; ".join(message for _, _, message in problems[:3])

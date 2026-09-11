@@ -87,6 +87,35 @@ def test_keyword_fallback_carries_the_plate_with_both_hands():
     assert check_semantics(plan) == []
 
 
+def test_complete_fills_the_pour_preconditions():
+    from planner.planner import complete
+    plan, notes = complete(parse_plan_text("pour right mug"))
+    skills = [(s["skill"], s.get("object")) for stage in plan for s in stage]
+    assert skills.index(("pick_place", "mug")) < skills.index(("pick_lift", "bottle")) < skills.index(("pour", None))
+    assert ("return", "bottle") in skills and skills[-1] == ("home", None)
+    assert len(notes) == 4 and check_semantics(plan) == []
+
+
+def test_complete_opens_the_drawer_and_drops_duplicates():
+    from planner.planner import complete
+    plan, notes = complete(parse_plan_text("pick_place left fork\npick_place left fork\nhome left ; home right"))
+    assert plan[0] == [{"skill": "open_drawer", "arm": "left"}]
+    assert sum(s["skill"] == "pick_place" for stage in plan for s in stage) == 1
+    assert check_semantics(plan) == []
+
+
+def test_parse_maps_pick_place_bottle_to_a_lift():
+    plan = parse_plan_text("pick_place right bottle")
+    assert plan[0][0]["skill"] == "pick_lift"
+
+
+def test_keyword_fallback_understands_set_the_table():
+    plan = keyword_plan("Set the table and pour me a drink.")
+    skills = {(s["skill"], s.get("object")) for stage in plan for s in stage}
+    assert {("bimanual_place", "plate"), ("open_drawer", None), ("pick_place", "mug"), ("pour", None)} <= skills
+    assert check_semantics(plan) == []
+
+
 def test_repair_drops_a_stray_place_step():
     plan = parse_plan_text("pick_place right plate\nplace right plate\nhome right")
     repaired = repair(plan)
