@@ -1,0 +1,74 @@
+{
+  "title": "Table for Two",
+  "subtitle": "Two SO-101 arms set a dinner table from one sentence — planned and driven on OpenVINO",
+  "event": "AI Infra Summit Hackathon · Intel Physical AI Online Challenge · September 2026",
+  "planner": {
+    "model": "Qwen2.5-1.5B-Instruct INT4 (OpenVINO GenAI)",
+    "cpu_latency_s": 2.12,
+    "igpu_latency_s": 2.22,
+    "unit_tests": 16
+  },
+  "data": {
+    "episodes": 50,
+    "frames": 32285,
+    "fps": 10,
+    "train_steps": 20000,
+    "scripted_success_on_train_seeds": "50 of 51 seeds"
+  },
+  "latency": [
+    {
+      "label": "FP32 · CPU",
+      "ms": 15.8
+    },
+    {
+      "label": "INT8 · CPU",
+      "ms": 5.9
+    },
+    {
+      "label": "FP32 · Intel iGPU",
+      "ms": 10.1
+    },
+    {
+      "label": "FP16 · Intel iGPU",
+      "ms": 8.2
+    }
+  ],
+  "int8_speedup": "2.7×",
+  "int8_action_error_rad": 0.02012,
+  "subgoals": [
+    "Drawer opened",
+    "Spoon placed",
+    "Fork handed off + placed",
+    "Plate on placemat",
+    "Mug placed",
+    "Poured"
+  ],
+  "scripted_10_seeds": [
+    10,
+    10,
+    10,
+    10,
+    10,
+    10
+  ],
+  "policy_10_seeds": [
+    10,
+    4,
+    5,
+    10,
+    10,
+    10
+  ],
+  "hybrid_10_seeds": [
+    10,
+    9,
+    9,
+    10,
+    9,
+    7
+  ],
+  "policy_full_task": 4,
+  "hybrid_full_task": 6,
+  "failure_note": "Spoon: grasped in 10/10 seeds, set down 3.3–4.6 cm from target (pass line 3 cm). Pour: failed seeds stop at ~47° tilt.",
+  "hardware_note": "Measured on Intel Core i9-14900HX + Raptor Lake iGPU; bench/benchmark.py reproduces every number on a Core Ultra in one command."
+}
