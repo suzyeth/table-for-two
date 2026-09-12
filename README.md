@@ -121,8 +121,13 @@ let go 0.4 mm up, landing at 0.05 m/s). In the hand, the plate tilts up to
 10° and shifts up to 13 mm when one arm carries more of it; the spoon sags
 8–17° during the hand-over; the mug and the fork stay within 4°.
 
-**Language planner on Intel hardware** (`bench/benchmark.py`, 5 instructions,
-measured with an earlier prompt that lacked the two-handed plate rule; to be
+**Language planner.** On 20 paraphrased instructions (`tools/planner_eval.py`,
+different wording, order, synonyms, partial requests, named arms) every plan
+passes the syntax and hand-state checks, and 14/20 contain exactly the steps
+asked for; 13 of the 20 plans came from the language model (the rest from the
+keyword fallback after the model's plan failed the checks). The commonest
+mistake is adding an unrequested step. Latency on Intel hardware
+(`bench/benchmark.py`, 5 instructions; measured with an earlier prompt, to be
 re-measured):
 
 | Device | Plan latency mean / p95 (s) | Time to first token (ms) | Time per token (ms) | Tokens/s |
