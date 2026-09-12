@@ -19,6 +19,17 @@ torque it can sustain (0.8 N·m, about 10 N at the fingertip, not the 2.94 N·m
 stall figure), with rubber pads of μ = 0.8. Object mass, pad friction and
 object friction are randomised per scene.
 
+## Why it matters
+
+Table setting is a stand-in for the everyday two-handed jobs a home or
+care-home assistant robot would do: fetch from a drawer, carry something too
+wide for one hand, pour, pass an object from one hand to the other. The SO-101
+costs about $100 an arm and its whole inference stack here — planner, policy
+and stage detection — runs on an Intel laptop's CPU and integrated GPU through
+OpenVINO, with no cloud and no discrete GPU at run time. Everything the arms do
+is held by simulated friction, so what works here has a chance of working on
+the printed fingers of a real SO-101.
+
 ## How it works
 
 ```mermaid
@@ -159,11 +170,19 @@ two ways: isolated single-call (zero inputs, 200 calls) and in-the-loop
   poses, centres of mass and contact events (set-downs stop at the first
   contact). The policy sees only cameras and joints, with no gripper load
   signal, so it must learn timing from pixels.
-- **Stage completion is judged by the simulator.** During rollouts an oracle
-  reads the physical state to decide when a stage is done and advances the
-  policy's subtask token; the policy does not detect completion itself. `home`
-  stages are never scored, and a stage's success is also reported conditional
-  on every earlier stage having been solved by the policy.
+- **Stage completion: two modes, both reported.** With `--switch oracle` the
+  evaluator reads the physical state to decide when a stage is done and
+  advances the policy's subtask token. With `--switch head` a small
+  stage-completion network (`policy/stage_head.py`, same cameras and joints as
+  the policy, trained on the same demonstrations, run through OpenVINO) makes
+  that call and the oracle only scores it. `home` stages are never scored, and
+  a stage's success is also reported conditional on every earlier stage having
+  been solved by the policy.
+- **The planner fills in preconditions.** If the language model writes
+  "pour" without picking up the bottle, or asks for a fork with the drawer
+  shut, `planner.complete()` inserts the missing steps and logs it; on 20
+  paraphrased instructions the rate of fully correct plans is reported in
+  `out/planner_eval.json`.
 - **Hardware.** The challenge targets Intel Core Ultra Series 2/3. This build
   was developed and benchmarked on an Intel Core i9-14900HX with its Raptor Lake
   integrated GPU; the NVIDIA RTX 4060 in the same laptop was used only to train
