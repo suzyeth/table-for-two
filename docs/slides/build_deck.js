@@ -79,7 +79,7 @@ function bullets(items) {
   const stages = [
     ["Speech or text", "Speechmatics transcribes a spoken instruction"],
     ["Planner", "Qwen2.5-1.5B INT4 on OpenVINO GenAI writes a checked plan"],
-    ["Stage executor", "Subtask token for each stage; both arms run in parallel"],
+    ["Stage executor", "Subtask token per stage; a learned stage-completion head (or the simulator oracle) ends it"],
     ["ACT policy", "4 cameras (2 scene + 2 wrist) + 12 joints → 12 joint targets at 10 Hz, OpenVINO INT8"],
     ["MuJoCo", "Dual SO-101 arms, contact-only grasps, drawer, plate, mug, bead water, utensils"],
   ];
@@ -128,7 +128,7 @@ function bullets(items) {
   const steps = [
     ["1", "Compact plan language", "One stage per line, ~60 tokens instead of ~400 of JSON a 1.5 B model breaks."],
     ["2", "Syntax + hand-state check", "Known skills and objects; simulate what each hand holds — no pouring without the bottle."],
-    ["3", "Retry, repair, fall back", "Errors go back to the model once; bad steps are dropped; a keyword planner is last resort."],
+    ["3", "Complete, retry, fall back", "Missing preconditions (bottle before a pour, drawer before a fork) are filled in and logged; errors go back to the model once; a keyword planner is last resort. 20 paraphrased instructions: 20/20 valid, 14/20 exactly right."],
   ];
   steps.forEach(([num, head, text], i) => {
     const y = 1.6 + i * 1.5;

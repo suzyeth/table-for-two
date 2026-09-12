@@ -1,6 +1,6 @@
 # Table for Two — bimanual SO-101 table setting on OpenVINO
 
-![Both SO-101 arms mid-pour over the placemat, drawer open](docs/media/cover.png)
+![Both SO-101 arms carrying the plate to the placemat between them](docs/media/cover.png)
 
 Two simulated SO-101 arms set a dinner table from a spoken or typed instruction:
 carry the plate to the placemat with both hands, open the drawer while placing
@@ -230,6 +230,8 @@ python -m sim.task                                   # seeds 0-9, ~30 s wall eac
 python -m sim.task --seeds $(seq 1000 1029)          # the unseen block (PowerShell: --seeds (1000..1029))
 python -m tools.audit_contact --seeds 0 1 2          # balance / set-down / drop audit, ~30 s per seed
 python -m tools.trace_stage --stage 5 --object spoon # one stage (0-based; 5 = hand-over) with close-ups
+python -m tools.robustness_envelope --seeds 1 2 3     # push friction / mass / position past the randomised ranges (~25 min)
+python -m tools.render_media                         # cover stills and the 10-seed grid video (~8 min)
 ```
 
 ### 3. Language planner — one 0.9 GB download
@@ -239,6 +241,7 @@ python -m planner.download_model                     # Qwen2.5-1.5B-Instruct INT
 python -m planner.planner "Set the table and pour a drink"    # ~2 s per plan on CPU after loading
 python demo.py --seed 3                              # instruction -> plan -> scripted execution -> out/demo.mp4
 python -m bench.benchmark --skip-planner             # policy IRs only; drop the flag to time the planner too
+python -m tools.planner_eval                         # 20 paraphrased instructions -> valid / correct plan rate
 ```
 
 Spoken input: copy `.env.example` to `.env`, add a Speechmatics key, then
@@ -257,6 +260,8 @@ python -m policy.export_openvino                     # FP32 / FP16 / INT8 IR + a
 python -m policy.rollout --mode policy               # learned policy alone, seeds 0-9, 40 s per stage
 python -m policy.rollout --mode hybrid               # a scripted skill finishes any timed-out stage (counted as assisted)
 python -m policy.rollout --stagewise                 # each stage from a scripted start state
+python -m policy.stage_head train && python -m policy.stage_head export   # stage-completion head (~10 min GPU)
+python -m policy.rollout --mode policy --switch head # the policy side ends each stage; the oracle only scores
 python -m bench.benchmark                            # planner + every IR in models/policy on CPU / iGPU / NPU
 ```
 
