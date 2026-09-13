@@ -1,0 +1,10 @@
+# v2 evaluation, run by tools/run_parallel.py (at most 3 at once).
+# Rollouts are step-driven, so success rates do not depend on running side by side.
+v2_policy_fp32     | .venv\Scripts\python.exe -m policy.rollout --mode policy --policy models\policy_v2\act_fp32.xml --checkpoint outputs\act_contact_v2\checkpoints\060000\pretrained_model --out out\v2_rollout_policy_fp32.json
+v2_hybrid_fp32     | .venv\Scripts\python.exe -m policy.rollout --mode hybrid --policy models\policy_v2\act_fp32.xml --checkpoint outputs\act_contact_v2\checkpoints\060000\pretrained_model --out out\v2_rollout_hybrid_fp32.json
+v2_stagewise_fp32  | .venv\Scripts\python.exe -m policy.rollout --stagewise --policy models\policy_v2\act_fp32.xml --checkpoint outputs\act_contact_v2\checkpoints\060000\pretrained_model --out out\v2_rollout_stagewise_fp32.json
+v2_policy_int8     | .venv\Scripts\python.exe -m policy.rollout --mode policy --policy models\policy_v2\act_int8.xml --checkpoint outputs\act_contact_v2\checkpoints\060000\pretrained_model --out out\v2_rollout_policy_int8.json
+v2_policy_ens      | .venv\Scripts\python.exe -m policy.rollout --mode policy --ensemble 0.01 --policy models\policy_v2\act_fp32.xml --checkpoint outputs\act_contact_v2\checkpoints\060000\pretrained_model --out out\v2_rollout_policy_fp32_ens.json
+v2_stagewise_ens   | .venv\Scripts\python.exe -m policy.rollout --stagewise --ensemble 0.01 --policy models\policy_v2\act_fp32.xml --checkpoint outputs\act_contact_v2\checkpoints\060000\pretrained_model --out out\v2_rollout_stagewise_fp32_ens.json
+v2_policy_int8_ac  | .venv\Scripts\python.exe -m policy.rollout --mode policy --policy models\policy_v2_ac\act_int8.xml --checkpoint outputs\act_contact_v2\checkpoints\060000\pretrained_model --out out\v2_rollout_policy_int8_ac.json
+v2_stage_head      | .venv\Scripts\python.exe -m policy.stage_head train --dataset-root data\dinner_table_contact_300 && .venv\Scripts\python.exe -m policy.stage_head export --dataset-root data\dinner_table_contact_300

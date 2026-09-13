@@ -63,6 +63,7 @@ def build_args(args):
         f"--save_freq={args.save_freq}",
         "--log_freq=100",
         "--wandb.enable=false",
+        f"--policy.use_amp={'true' if args.amp else 'false'}",
     ]
 
 
@@ -77,6 +78,8 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--save-freq", type=int, default=5000)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--amp", action="store_true",
+                        help="automatic mixed precision (float16 autocast on CUDA); weights are still saved in float32")
     parser.add_argument("--dry-run", action="store_true", help="print the arguments without training")
     args = parser.parse_args()
 
