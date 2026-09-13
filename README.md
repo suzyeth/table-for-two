@@ -127,20 +127,57 @@ passes the syntax and hand-state checks, and 14/20 contain exactly the steps
 asked for; 13 of the 20 plans came from the language model (the rest from the
 keyword fallback after the model's plan failed the checks). The commonest
 mistake is adding an unrequested step. Latency on Intel hardware
-(`bench/benchmark.py`, 5 instructions; measured with an earlier prompt, to be
-re-measured):
+(`bench/benchmark.py`, 5 instructions, current prompt; on those five the
+model's own plan was accepted as written 2/5 times, the other three went
+through precondition completion or the keyword fallback):
 
 | Device | Plan latency mean / p95 (s) | Time to first token (ms) | Time per token (ms) | Tokens/s |
 |---|---|---|---|---|
-| CPU (i9-14900HX) | 2.12 / 5.73 | 825 | 28.8 | 34.7 |
-| Intel iGPU (Raptor Lake UHD) | 2.22 / 5.15 | 974 | 36.9 | 27.1 |
+| CPU (i9-14900HX) | 2.19 / 6.14 | 704 | 24.0 | 41.7 |
+| Intel iGPU (Raptor Lake UHD) | 2.37 / 4.73 | 774 | 34.9 | 28.7 |
 
-**Learned policy:** being retrained on contact-physics demonstrations (150
-episodes, four cameras). Results, INT8 accuracy and the Intel latency table for
-the four-camera network will be filled in here from `policy/rollout.py`,
-`policy/export_openvino.py` and `bench/benchmark.py`. Latency will be reported
-two ways: isolated single-call (zero inputs, 200 calls) and in-the-loop
-(render + preprocess + infer + postprocess, as measured during rollouts).
+**Learned policy (v1: 150 demonstrations, 40k steps, four cameras).** Stage
+success on the ten evaluation seeds (`policy/rollout.py`; a stage counts only
+if the policy finished it inside 40 s; `home` stages are not scored):
+
+| Stage | Chained, action queue | Chained, temporal ensemble | Each stage from a scripted start | Chained, INT8 |
+|---|---|---|---|---|
+| Two-handed plate carry | 9/10 | 10/10 | 9/10 | 9/10 |
+| Drawer + mug | 9/10 | 10/10 | 10/10 | 10/10 |
+| Bottle lift + fork | 8/10 | 10/10 | 10/10 | 8/10 |
+| Pour | 3/10 | 6/10 | 7/10 | 5/10 |
+| Bottle back | 5/10 | 6/10 | 10/10 | 5/10 |
+| Spoon hand-over | 2/10 | 0/10 | 9/10 | 1/10 |
+| **Whole table in one run** | **0/10** | **0/10** | — | **0/10** |
+
+Hybrid mode (a scripted skill finishes any stage the policy timed out on,
+counted as assisted, never as a success) sets no full table either: 1.9
+assisted stages per episode, most often the hand-over (8/10) and the pour
+(7/10).
+
+How to read this: every skill is learned — started from a clean scripted
+state, each stage succeeds 7–10 times in 10 — but the chain breaks because the
+states the policy leaves behind (where it set the bottle down, how the mug
+ended up) drift away from the demonstrations, so the later stages see inputs
+they were never trained on. Temporal ensembling (`--ensemble 0.01`: one
+inference per step, overlapping chunks blended with the ACT paper's weights)
+doubles the pour rate without retraining but has not yet made the hand-over
+work. A second policy trained on 300 demonstrations is in progress and this
+table will be extended with it.
+
+OpenVINO latency of the four-camera network, isolated single call (zero
+inputs, 200 calls; `bench/benchmark.py` writes `out/benchmark.md`):
+
+| Model | CPU mean / p95 (ms) | Intel iGPU mean / p95 (ms) | Size (MB) | Action error vs FP32, mean / max (rad) |
+|---|---|---|---|---|
+| FP32 | 19.6 / 27.7 | 14.2 / 16.3 | 136.8 | — |
+| FP16 | 17.1 / 20.1 | 13.8 / 14.3 | 68.4 | 0.00006 / 0.0007 |
+| INT8 (NNCF) | 7.0 / 7.9 | 14.8 / 15.6 | 38.6 | 0.0037 / 0.104 |
+
+INT8 on CPU is the fastest configuration (142 calls/s); its worst-case action
+error of 0.10 rad (6°) is the likely reason the INT8 chained column sits a
+little below FP32. Every rollout report also records the in-the-loop cost
+(render + preprocess + infer + postprocess) of its own run.
 
 ## Honest notes
 
@@ -182,7 +219,11 @@ two ways: isolated single-call (zero inputs, 200 calls) and in-the-loop
   the policy, trained on the same demonstrations, run through OpenVINO) makes
   that call and the oracle only scores it. `home` stages are never scored, and
   a stage's success is also reported conditional on every earlier stage having
-  been solved by the policy.
+  been solved by the policy. On v1 the learned switch is not usable yet: it
+  ends stages early, and the chained run with `--switch head` scores 7/10,
+  10/10, 10/10 and then 0/10 for the pour, the bottle return and the hand-over
+  (`out/rollout_policy_fp32_head.json`), so every number in the results table
+  uses the oracle switch.
 - **The planner fills in preconditions.** If the language model writes
   "pour" without picking up the bottle, or asks for a fork with the drawer
   shut, `planner.complete()` inserts the missing steps and logs it; on 20
@@ -262,6 +303,7 @@ python -m policy.rollout --mode hybrid               # a scripted skill finishes
 python -m policy.rollout --stagewise                 # each stage from a scripted start state
 python -m policy.stage_head train && python -m policy.stage_head export   # stage-completion head (~10 min GPU)
 python -m policy.rollout --mode policy --switch head # the policy side ends each stage; the oracle only scores
+python -m policy.rollout --mode policy --ensemble 0.01 # temporal ensembling: infer every step, blend overlapping chunks
 python -m bench.benchmark                            # planner + every IR in models/policy on CPU / iGPU / NPU
 ```
 
