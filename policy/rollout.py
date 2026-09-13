@@ -20,6 +20,7 @@ import numpy as np
 
 from data.record import CAMERAS, IMAGE_SIZE, RECORD_EVERY, SUBTASK_VOCAB, stage_signature, subtask_onehot
 from policy.export_openvino import DEFAULT_CKPT
+from policy.video_views import compose_views
 from policy.ov_policy import OVActPolicy
 from sim.env import ARMS, TABLE_TOP_Z, UPRIGHT_TOL_DEG, DinnerTableEnv
 from sim.task import ARM_KEY, DEFAULT_PLAN, Executor
@@ -64,7 +65,7 @@ def stage_done(env, stage, elapsed_s):
     return all(checks)
 
 
-def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head=None):
+def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head=None, video_cameras=("operator",)):
     """Drive one stage with the policy; True if its predicate holds, and still holds after
     the arms have been held still for CONFIRM_SECONDS (so a bead splash or a plate that is
     about to tip over does not count).
@@ -86,7 +87,7 @@ def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head
         for _ in range(RECORD_EVERY):  # dataset is 10 Hz, control loop is 20 Hz
             env.step(action)
         if frames is not None:
-            frames.append(env.render("operator"))
+            frames.append(compose_views(env, video_cameras))
         elapsed = (k + 1) * RECORD_EVERY / 20
         if head is not None:
             head.done(state, onehot, images)
@@ -107,7 +108,7 @@ def run_stage_scripted(env, executor, stage):
     executor.run([stage])
 
 
-def evaluate(policy, seeds, plan, mode, video_frames=None, head=None):
+def evaluate(policy, seeds, plan, mode, video_frames=None, head=None, video_cameras=("operator",)):
     env = DinnerTableEnv(obs_cameras=())
     executor = Executor(env)
     per_seed = []
@@ -120,7 +121,7 @@ def evaluate(policy, seeds, plan, mode, video_frames=None, head=None):
             signature = stage_signature(stage)
             if signature not in SUBTASK_VOCAB:
                 raise ValueError(f"stage '{signature}' was never demonstrated; the policy cannot run it")
-            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(signature), video_frames, head)
+            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(signature), video_frames, head, video_cameras)
             assisted = False
             if not ok and mode == "hybrid":
                 run_stage_scripted(env, executor, stage)
@@ -205,6 +206,9 @@ def main():
                         help="score each stage separately, starting it from a scripted state")
     parser.add_argument("--plan", type=Path, help="JSON plan (e.g. from the planner); default plan otherwise")
     parser.add_argument("--video", type=Path)
+    parser.add_argument("--video-cameras", default="operator",
+                        help="comma-separated cameras for --video; several are tiled into one labelled frame "
+                             "(e.g. front_high,overhead,left_wrist_cam,right_wrist_cam)")
     parser.add_argument("--out", type=Path, default=ROOT / "out" / "rollout_report.json")
     args = parser.parse_args()
 
@@ -223,7 +227,8 @@ def main():
         print(json.dumps(report, indent=1))
         return
     frames = [] if args.video else None
-    per_seed = evaluate(policy, args.seeds, plan, args.mode, frames, head)
+    per_seed = evaluate(policy, args.seeds, plan, args.mode, frames, head,
+                        tuple(c.strip() for c in args.video_cameras.split(",") if c.strip()))
     report = {"policy": str(args.policy), "mode": args.mode, "switch": args.switch, "ensemble": args.ensemble, "seeds": args.seeds,
               "summary": summarise(per_seed, policy), "episodes": per_seed}
     args.out.parent.mkdir(parents=True, exist_ok=True)
