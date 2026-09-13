@@ -117,20 +117,29 @@ class KnockMonitor:
             if obj in self.moving:
                 moving = self.moving[obj]
                 moving["max_speed"] = max(moving["max_speed"], speed)
+                moving["hit_by"] |= self._touching_names(obj)
                 if speed < KNOCK_REST_MPS and supports(self.env, obj):
                     self.events.append({"object": obj, "kind": "knocked", "stage": moving["stage"],
                                         "max_speed_mps": round(moving["max_speed"], 3),
-                                        "height_change_mm": round((z - moving["z0"]) * 1000, 1)})
+                                        "height_change_mm": round((z - moving["z0"]) * 1000, 1),
+                                        "hit_by": sorted(moving["hit_by"])})
                     del self.moving[obj]
             elif speed > KNOCK_SPEED_MPS:
-                self.moving[obj] = {"stage": stage, "z0": z, "max_speed": speed}
+                self.moving[obj] = {"stage": stage, "z0": z, "max_speed": speed,
+                                    "hit_by": self._touching_names(obj)}
+
+    def _touching_names(self, obj):
+        """Names of everything touching ``obj`` except the table: who is pushing it."""
+        model = self.env.model
+        names = {model.body(b).name for b in self.env._contact_bodies(obj)}
+        return {n for n in names if n and n != "table" and not n.startswith("water_")}
 
     def finish(self):
         """Knocks still in motion when the run ends are reported too."""
         for obj, moving in self.moving.items():
             self.events.append({"object": obj, "kind": "knocked", "stage": moving["stage"],
                                 "max_speed_mps": round(moving["max_speed"], 3), "height_change_mm": None,
-                                "still_moving_at_end": True})
+                                "hit_by": sorted(moving["hit_by"]), "still_moving_at_end": True})
         self.moving = {}
 
 
