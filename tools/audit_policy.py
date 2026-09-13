@@ -1,9 +1,10 @@
-"""Audit how the learned policy puts objects down: set down gently, or dropped.
+"""Audit how objects are put down: set down gently, or dropped, tipped or knocked.
 
-Runs the learned policy through the plan (pure policy, no scripted takeover) and
-attaches the same ``Watcher`` that ``tools/audit_contact.py`` uses for the
-scripted pipeline. Every physics control step is observed, including the pauses
-the evaluator holds to confirm a stage, so no landing is missed.
+Runs the learned policy through the plan (pure policy, no scripted takeover) -
+or, with ``--scripted``, the scripted pipeline the demonstrations came from - and
+attaches the same ``Watcher`` that ``tools/audit_contact.py`` uses. Every physics
+control step is observed, including the pauses the evaluator holds to confirm a
+stage, so no landing is missed.
 
 Each release is classified:
   placed   the object was already resting on a support when the last finger left it;
@@ -17,6 +18,7 @@ Supports never include the robot or the water beads (see ``tools.audit_contact.s
 
 Run:  .venv\\Scripts\\python.exe -m tools.audit_policy --policy models/policy_v2/act_fp32.xml ^
         --checkpoint outputs/act_contact_v2/checkpoints/060000/pretrained_model --ensemble 0.01 --seeds 0 1 2
+      .venv\\Scripts\\python.exe -m tools.audit_policy --scripted --seeds 0 1 2
 """
 import argparse
 import json
@@ -52,8 +54,13 @@ class PolicyCommands:
 
 
 def classify(event, max_drop_mm=GENTLE_DROP_MM, max_impact_mps=GENTLE_IMPACT_MPS):
-    """'placed', 'gentle', 'dropped' or 'tipped' for one release event from ``Watcher``."""
-    tilt = event.get("tilt_at_release_deg")
+    """'placed', 'gentle', 'dropped' or 'tipped' for one release event from ``Watcher``.
+
+    Tipping is judged on ``settled_tilt_deg`` (measured SETTLE_STEPS after the release, once the
+    object has come to rest) when available: at the instant of release a plate still rocks
+    between two hands and reads a few degrees more than where it ends up.
+    """
+    tilt = event.get("settled_tilt_deg", event.get("tilt_at_release_deg"))
     tipped = tilt is not None and tilt > UPRIGHT_TOL_DEG
     if event["resting_on_support_at_release"]:
         return "tipped" if tipped else "placed"
@@ -67,8 +74,15 @@ def classify(event, max_drop_mm=GENTLE_DROP_MM, max_impact_mps=GENTLE_IMPACT_MPS
     return "tipped" if tipped else "gentle"
 
 
+SETTLE_STEPS = 20  # 1 s after a release the object has come to rest; its tilt is judged then
+
+
 class KnockMonitor:
-    """Props that move fast without being held and without falling from a release: knocked."""
+    """Props that move fast without being held and without falling from a release: knocked.
+
+    It also records each released object's tilt SETTLE_STEPS after the release
+    (``settled_tilt_deg``), which ``classify`` uses to judge tipping.
+    """
 
     def __init__(self, env, watcher):
         self.env, self.watcher = env, watcher
@@ -77,6 +91,7 @@ class KnockMonitor:
         self.steps = 0
         self.last_release = {}  # obj -> control step of its latest release
         self.seen_releases = 0
+        self.pending_tilt = []  # (release event, control step at which to measure its settled tilt)
 
     def step(self, stage):
         from tools.audit_contact import supports, velocity
@@ -84,7 +99,13 @@ class KnockMonitor:
         self.steps += 1
         for event in self.watcher.events[self.seen_releases:]:
             self.last_release[event["object"]] = self.steps
+            if event.get("tilt_at_release_deg") is not None:  # utensils have no upright to lose
+                self.pending_tilt.append((event, self.steps + SETTLE_STEPS))
         self.seen_releases = len(self.watcher.events)
+        for event, due in self.pending_tilt:
+            if due <= self.steps and event["object"] not in self.watcher.hold:  # regrasped: keep release tilt
+                event["settled_tilt_deg"] = round(float(self.env.tilt_deg(event["object"])), 1)
+        self.pending_tilt = [(e, due) for e, due in self.pending_tilt if due > self.steps]
         for obj in PROPS:
             if obj in self.watcher.hold or obj in self.watcher.falling or self.watcher.touching_arms(obj):
                 self.moving.pop(obj, None)
@@ -134,13 +155,18 @@ def summarize(events):
     return {"per_object": per_object, "total": total}
 
 
-def audit_seed(env, policy, seed, plan=DEFAULT_PLAN):
-    """Run one seed with every control step watched; return (events, per-stage ok, final success)."""
-    from policy.rollout import run_stage_policy
+def audit_seed(env, policy, seed, plan=DEFAULT_PLAN, executor=None):
+    """Run one seed with every control step watched; return (events, per-stage ok, final success).
+
+    With ``executor`` (a ``sim.task.Executor``) the scripted pipeline runs the plan instead of
+    ``policy``; per-stage results are then not available and an empty list is returned.
+    """
     from tools.audit_contact import Watcher
 
     env.reset(seed)
-    commands = PolicyCommands()
+    if executor is not None:
+        executor.reset()
+    commands = executor if executor is not None else PolicyCommands()
     watcher = Watcher(env, commands)
     knocks = KnockMonitor(env, watcher)
     current = {"label": ""}
@@ -148,7 +174,8 @@ def audit_seed(env, policy, seed, plan=DEFAULT_PLAN):
 
     def watched_step(action):
         result = raw_step(action)
-        commands.update(action)
+        if executor is None:
+            commands.update(action)
         watcher.step(current["label"])
         knocks.step(current["label"])
         return result
@@ -156,9 +183,15 @@ def audit_seed(env, policy, seed, plan=DEFAULT_PLAN):
     env.step = watched_step  # env.hold() calls self.step, so confirmation pauses are watched too
     try:
         stage_ok = []
-        for stage in plan:
-            current["label"] = stage_signature(stage)
-            stage_ok.append(bool(run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(current["label"]))))
+        if executor is not None:
+            executor.run(plan, on_step=lambda _action, label: current.update(label=label))
+        else:
+            from policy.rollout import run_stage_policy
+
+            for stage in plan:
+                current["label"] = stage_signature(stage)
+                ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(current["label"]))
+                stage_ok.append(bool(ok))
         env.hold(CONFIRM_SECONDS)
     finally:
         del env.step
@@ -167,23 +200,32 @@ def audit_seed(env, policy, seed, plan=DEFAULT_PLAN):
 
 
 def main():
-    from policy.ov_policy import OVActPolicy
     from sim.env import DinnerTableEnv
+    from sim.task import Executor
 
-    parser = argparse.ArgumentParser(description="Set-down vs drop audit of the learned policy.")
-    parser.add_argument("--policy", type=Path, required=True)
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser = argparse.ArgumentParser(description="Set-down vs drop / tip / knock audit.")
+    parser.add_argument("--scripted", action="store_true", help="audit the scripted pipeline instead of a policy")
+    parser.add_argument("--policy", type=Path)
+    parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--device", default="CPU")
     parser.add_argument("--ensemble", type=float, default=None, metavar="M")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)))
     parser.add_argument("--out", type=Path, default=ROOT / "out" / "audit_policy.json")
     args = parser.parse_args()
 
-    policy = OVActPolicy(args.policy, args.checkpoint, device=args.device, ensemble_m=args.ensemble)
     env = DinnerTableEnv(obs_cameras=())
-    report, all_events = {"policy": str(args.policy), "ensemble": args.ensemble, "seeds": {}}, []
+    if args.scripted:
+        policy, executor, source = None, Executor(env), "scripted"
+    else:
+        if args.policy is None or args.checkpoint is None:
+            raise SystemExit("--policy and --checkpoint are required unless --scripted")
+        from policy.ov_policy import OVActPolicy
+
+        policy = OVActPolicy(args.policy, args.checkpoint, device=args.device, ensemble_m=args.ensemble)
+        executor, source = None, str(args.policy)
+    report, all_events = {"source": source, "ensemble": args.ensemble, "seeds": {}}, []
     for seed in args.seeds:
-        events, stage_ok, success = audit_seed(env, policy, seed)
+        events, stage_ok, success = audit_seed(env, policy, seed, executor=executor)
         for event in events:
             event["kind"] = event_kind(event)
         all_events.extend(events)
@@ -193,7 +235,8 @@ def main():
         knocked = [f"{e['object']} {e['max_speed_mps']} m/s" for e in events if e["kind"] == "knocked"]
         tipped = [e["object"] for e in events if e["kind"] == "tipped"]
         releases = sum(e["kind"] != "knocked" for e in events)
-        print(f"seed {seed}: stages {sum(stage_ok)}/{len(stage_ok)} full={success['all']} releases {releases} "
+        stages = f"{sum(stage_ok)}/{len(stage_ok)}" if stage_ok else "scripted"
+        print(f"seed {seed}: stages {stages} full={success['all']} releases {releases} "
               f"dropped {drops} tipped {tipped} knocked {knocked}", flush=True)
     env.close()
     report["summary"] = summarize(all_events)
