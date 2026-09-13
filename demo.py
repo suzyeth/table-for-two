@@ -77,7 +77,8 @@ def stage_text(stage):
             parts.append(f"hand {sub['object']} {sub['giver']} -> {sub['receiver']}")
         else:
             target = sub.get("object") or sub.get("into") or ""
-            parts.append(f"{sub['arm']}: {sub['skill'].replace('_', ' ')} {target}".strip())
+            arm = sub.get("arm", "both")  # bimanual_place carries with both hands and names no arm
+            parts.append(f"{arm}: {sub['skill'].replace('_', ' ')} {target}".strip())
     return "  |  ".join(parts)
 
 
