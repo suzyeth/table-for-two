@@ -35,10 +35,24 @@ def attitude(env, obj):
     return rot[:, 0] if obj in UTENSIL_OBJECTS else rot[:, 2]
 
 
+def robot_and_water_bodies(env):
+    """Bodies that never count as a support: every link of both arms, and the water beads.
+
+    Beads sit inside the full bottle (and later the mug) and touch its walls, and an object
+    can lean on the other arm's wrist; neither means the object has been set down.
+    """
+    cached = getattr(env, "_not_support_ids", None)
+    if cached is None:
+        model = env.model
+        robot = {i for i in range(model.nbody) if (model.body(i).name or "").startswith(ARMS)}
+        cached = frozenset(robot | {int(b) for b in env.water_ids})
+        env._not_support_ids = cached
+    return cached
+
+
 def supports(env, obj):
-    """Bodies other than fingers touching ``obj``."""
-    fingers = set().union(*env.finger_bodies.values())
-    return env._contact_bodies(obj) - fingers
+    """Bodies other than the robot and the water touching ``obj`` (table, plate, drawer, other props)."""
+    return env._contact_bodies(obj) - robot_and_water_bodies(env)
 
 
 def velocity(env, obj):

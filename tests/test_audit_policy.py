@@ -36,7 +36,7 @@ def test_summary_counts_and_worst_values():
     events = [release("mug", resting=True), release("fork", height=2.0, speed=0.05),
               release("fork", height=30.0, speed=0.8), release("spoon", height=6.0, speed=0.2)]
     summary = summarize(events)
-    assert summary["total"] == {"placed": 1, "gentle": 1, "dropped": 2}
+    assert summary["total"] == {"placed": 1, "gentle": 1, "dropped": 2, "tipped": 0, "knocked": 0}
     assert summary["per_object"]["fork"]["worst_drop_mm"] == 30.0
     assert summary["per_object"]["fork"]["worst_impact_mps"] == 0.8
 
