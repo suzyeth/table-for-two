@@ -10,9 +10,13 @@ Each release is classified:
   placed   the object was already resting on a support when the last finger left it;
   gentle   it fell at most GENTLE_DROP_MM and landed no faster than GENTLE_IMPACT_MPS;
   dropped  anything else (including an object lost while the jaws were still squeezing);
-  tipped   set down or landed more than UPRIGHT_TOL_DEG off upright (plate, mug, bottle).
-Separately, any prop that moves faster than KNOCK_SPEED_MPS without being held or falling
-from a release is logged as "knocked": an arm flicked or pushed it.
+  tipped   came to rest more than UPRIGHT_TOL_DEG off upright (plate, mug, bottle).
+Separately, a prop that is not held and not falling from a release but moves faster than
+KNOCK_SPEED_MPS is followed until it is at rest again:
+  knocked  something other than the table and the water touched it (``hit_by``: an arm, the
+           bottle, another prop) or it ended up more than KNOCK_MOVED_MM from where it was;
+  jostled  only the table and the water beads touched it and it barely moved - the beads
+           landing in the mug make it twitch, which is not the robot hitting anything.
 
 Supports never include the robot or the water beads (see ``tools.audit_contact.supports``).
 
@@ -35,10 +39,13 @@ ROOT = Path(__file__).resolve().parent.parent
 GENTLE_DROP_MM = 5.0  # released at most this far above its support ...
 GENTLE_IMPACT_MPS = 0.10  # ... and landing no faster than this counts as a gentle set-down
 CONFIRM_SECONDS = 1.0
-KNOCK_SPEED_MPS = 0.15  # an unheld prop moving faster than this was hit by an arm
-KNOCK_REST_MPS = 0.02  # ... and the knock is over once it is supported and slower than this
+KNOCK_SPEED_MPS = 0.15  # an unheld prop moving faster than this is followed as a possible knock
+KNOCK_REST_MPS = 0.02  # ... until it is supported and slower than this
+KNOCK_MOVED_MM = 2.0  # ... and it counts as knocked if it ended up further than this from where it was
 RELEASE_GRACE_STEPS = 10  # motion within 0.5 s of a release belongs to that release, not a knock
-KINDS = ("placed", "gentle", "dropped", "tipped", "knocked")
+SETTLE_STEPS = 20  # 1 s after a release the object has come to rest; its tilt is judged then
+KINDS = ("placed", "gentle", "dropped", "tipped", "knocked", "jostled")
+MOTION_KINDS = ("knocked", "jostled")
 
 
 class PolicyCommands:
@@ -74,11 +81,15 @@ def classify(event, max_drop_mm=GENTLE_DROP_MM, max_impact_mps=GENTLE_IMPACT_MPS
     return "tipped" if tipped else "gentle"
 
 
-SETTLE_STEPS = 20  # 1 s after a release the object has come to rest; its tilt is judged then
+def motion_kind(hit_by, moved_mm):
+    """'knocked' if something other than table/water touched it or it was displaced; else 'jostled'."""
+    if hit_by or moved_mm is None or moved_mm > KNOCK_MOVED_MM:
+        return "knocked"
+    return "jostled"
 
 
 class KnockMonitor:
-    """Props that move fast without being held and without falling from a release: knocked.
+    """Props that move fast without being held and without falling from a release.
 
     It also records each released object's tilt SETTLE_STEPS after the release
     (``settled_tilt_deg``), which ``classify`` uses to judge tipping.
@@ -86,7 +97,7 @@ class KnockMonitor:
 
     def __init__(self, env, watcher):
         self.env, self.watcher = env, watcher
-        self.moving = {}  # obj -> {"stage", "z0", "max_speed"}
+        self.moving = {}  # obj -> {"stage", "z0", "xy0", "max_speed", "hit_by", "water"}
         self.events = []
         self.steps = 0
         self.last_release = {}  # obj -> control step of its latest release
@@ -113,38 +124,48 @@ class KnockMonitor:
             if self.steps - self.last_release.get(obj, -RELEASE_GRACE_STEPS) < RELEASE_GRACE_STEPS:
                 continue
             speed = float(np.linalg.norm(velocity(self.env, obj)))
-            z = float(self.env.object_frame(obj)[0][2])
+            pos = self.env.object_frame(obj)[0]
             if obj in self.moving:
                 moving = self.moving[obj]
                 moving["max_speed"] = max(moving["max_speed"], speed)
-                moving["hit_by"] |= self._touching_names(obj)
+                hit, water = self._touching(obj)
+                moving["hit_by"] |= hit
+                moving["water"] = moving["water"] or water
                 if speed < KNOCK_REST_MPS and supports(self.env, obj):
-                    self.events.append({"object": obj, "kind": "knocked", "stage": moving["stage"],
-                                        "max_speed_mps": round(moving["max_speed"], 3),
-                                        "height_change_mm": round((z - moving["z0"]) * 1000, 1),
-                                        "hit_by": sorted(moving["hit_by"])})
+                    self.events.append(self._event(obj, moving, pos, still_moving=False))
                     del self.moving[obj]
             elif speed > KNOCK_SPEED_MPS:
-                self.moving[obj] = {"stage": stage, "z0": z, "max_speed": speed,
-                                    "hit_by": self._touching_names(obj)}
+                hit, water = self._touching(obj)
+                self.moving[obj] = {"stage": stage, "z0": float(pos[2]), "xy0": np.array(pos[:2], dtype=float),
+                                    "max_speed": speed, "hit_by": hit, "water": water}
 
-    def _touching_names(self, obj):
-        """Names of everything touching ``obj`` except the table: who is pushing it."""
+    def _touching(self, obj):
+        """(names of everything touching ``obj`` except the table and the water, water touching?)."""
         model = self.env.model
         names = {model.body(b).name for b in self.env._contact_bodies(obj)}
-        return {n for n in names if n and n != "table" and not n.startswith("water_")}
+        water = any(n and n.startswith("water_") for n in names)
+        return {n for n in names if n and n != "table" and not n.startswith("water_")}, water
+
+    def _event(self, obj, moving, pos, still_moving):
+        moved_mm = float(np.linalg.norm(np.asarray(pos[:2], dtype=float) - moving["xy0"]) * 1000)
+        event = {"object": obj, "kind": motion_kind(moving["hit_by"], moved_mm), "stage": moving["stage"],
+                 "max_speed_mps": round(moving["max_speed"], 3), "moved_mm": round(moved_mm, 1),
+                 "height_change_mm": round((float(pos[2]) - moving["z0"]) * 1000, 1),
+                 "hit_by": sorted(moving["hit_by"]), "water_contact": bool(moving["water"])}
+        if still_moving:
+            event["still_moving_at_end"] = True
+        return event
 
     def finish(self):
-        """Knocks still in motion when the run ends are reported too."""
+        """Motions not yet at rest when the run ends are reported too."""
         for obj, moving in self.moving.items():
-            self.events.append({"object": obj, "kind": "knocked", "stage": moving["stage"],
-                                "max_speed_mps": round(moving["max_speed"], 3), "height_change_mm": None,
-                                "hit_by": sorted(moving["hit_by"]), "still_moving_at_end": True})
+            self.events.append(self._event(obj, moving, self.env.object_frame(obj)[0], still_moving=True))
         self.moving = {}
 
 
 def event_kind(event):
-    return "knocked" if event.get("kind") == "knocked" else classify(event)
+    kind = event.get("kind")
+    return kind if kind in MOTION_KINDS else classify(event)
 
 
 def summarize(events):
@@ -155,6 +176,8 @@ def summarize(events):
         row = per_object.setdefault(event["object"], {**{k: 0 for k in KINDS},
                                                       "worst_drop_mm": 0.0, "worst_impact_mps": 0.0})
         row[kind] += 1
+        if kind == "jostled":
+            continue
         if kind == "knocked":
             row["worst_impact_mps"] = max(row["worst_impact_mps"], event.get("max_speed_mps") or 0.0)
             continue
@@ -241,12 +264,14 @@ def main():
         report["seeds"][seed] = {"events": events, "stage_ok": stage_ok, "success": success}
         drops = [f"{e['object']} {e.get('drop_height_mm', '?')} mm @ {e.get('drop_impact_speed_mps', '?')} m/s"
                  for e in events if e["kind"] == "dropped"]
-        knocked = [f"{e['object']} {e['max_speed_mps']} m/s" for e in events if e["kind"] == "knocked"]
+        knocked = [f"{e['object']} {e['moved_mm']} mm by {e['hit_by'] or 'nothing'}"
+                   for e in events if e["kind"] == "knocked"]
+        jostled = sum(e["kind"] == "jostled" for e in events)
         tipped = [e["object"] for e in events if e["kind"] == "tipped"]
-        releases = sum(e["kind"] != "knocked" for e in events)
+        releases = sum(e["kind"] not in MOTION_KINDS for e in events)
         stages = f"{sum(stage_ok)}/{len(stage_ok)}" if stage_ok else "scripted"
-        print(f"seed {seed}: stages {stages} full={success['all']} releases {releases} "
-              f"dropped {drops} tipped {tipped} knocked {knocked}", flush=True)
+        print(f"seed {seed}: stages {stages} full={success['all']} releases {releases} dropped {drops} "
+              f"tipped {tipped} knocked {knocked} jostled-by-water {jostled}", flush=True)
     env.close()
     report["summary"] = summarize(all_events)
     args.out.parent.mkdir(parents=True, exist_ok=True)
