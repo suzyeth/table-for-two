@@ -68,10 +68,51 @@ def batch_to_inputs(batch, image_keys):
     return [t.detach().cpu().numpy().astype(np.float32) for t in tensors]
 
 
-class OVActPolicy:
-    """ACT policy on an OpenVINO device with an action queue (re-plans every n_action_steps)."""
+class TemporalEnsemble:
+    """ACT-style temporal ensembling over overlapping action chunks.
 
-    def __init__(self, xml_path, pretrained_dir, device="CPU"):
+    Every control step a fresh chunk is added; the action for the current step is
+    the weighted mean of what every still-valid chunk predicted for it, with
+    w_i = exp(-m * i) where i = 0 is the oldest chunk (m = 0.01 in the ACT paper).
+    Smoother and more precise than executing n_action_steps of one chunk, at the
+    price of one inference per step.
+    """
+
+    def __init__(self, m=0.01):
+        self.m = float(m)
+        self.chunks = []  # (start_step, chunk)
+        self.t = 0
+
+    def reset(self):
+        self.chunks.clear()
+        self.t = 0
+
+    def add(self, chunk):
+        chunk = np.asarray(chunk)
+        self.chunks.append((self.t, chunk))
+        self._prune()
+
+    def step(self):
+        self.t += 1
+        self._prune()
+
+    def _prune(self):
+        self.chunks = [(s, c) for s, c in self.chunks if self.t - s < len(c)]
+
+    def action(self):
+        if not self.chunks:
+            raise RuntimeError("no action chunk added for this step")
+        preds = np.stack([c[self.t - s] for s, c in self.chunks])           # oldest first
+        weights = np.exp(-self.m * np.arange(len(preds), dtype=np.float64))
+        return (preds * weights[:, None]).sum(0) / weights.sum()
+
+
+class OVActPolicy:
+    """ACT policy on an OpenVINO device. Either an action queue (re-plan every
+    n_action_steps, LeRobot's default) or temporal ensembling (``ensemble_m``:
+    infer every step and blend overlapping chunks)."""
+
+    def __init__(self, xml_path, pretrained_dir, device="CPU", ensemble_m=None):
         xml_path = Path(xml_path)
         meta_path = xml_path.with_suffix(".json")
         if not xml_path.exists() or not meta_path.exists():
@@ -93,10 +134,13 @@ class OVActPolicy:
         self.compile_s = time.perf_counter() - started
         self.request = self.compiled.create_infer_request()
         self.queue = []
+        self.ensemble = TemporalEnsemble(ensemble_m) if ensemble_m is not None else None
         self.infer_ms = []
 
     def reset(self):
         self.queue.clear()
+        if self.ensemble is not None:
+            self.ensemble.reset()
 
     def infer_chunk(self, state, env_state, images):
         """Return the un-normalised action chunk, shape (chunk_size, 12)."""
@@ -109,6 +153,11 @@ class OVActPolicy:
         return np.asarray(action.detach().cpu().numpy()).reshape(-1, 12)
 
     def select_action(self, state, env_state, images):
+        if self.ensemble is not None:
+            self.ensemble.add(self.infer_chunk(state, env_state, images))
+            action = self.ensemble.action()
+            self.ensemble.step()
+            return action
         if not self.queue:
             self.queue = list(self.infer_chunk(state, env_state, images)[:self.n_action_steps])
         return self.queue.pop(0)

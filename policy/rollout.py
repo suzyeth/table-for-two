@@ -198,6 +198,9 @@ def main():
     parser.add_argument("--switch", choices=("oracle", "head"), default="oracle",
                         help="who ends a stage: the simulator oracle, or the policy's stage-completion head")
     parser.add_argument("--head", type=Path, default=ROOT / "models" / "stage_head" / "stage_head_int8.xml")
+    parser.add_argument("--ensemble", type=float, default=None, metavar="M",
+                        help="temporal ensembling: infer every step and blend overlapping chunks with "
+                             "weights exp(-M*i) (ACT paper uses 0.01); default = LeRobot action queue")
     parser.add_argument("--stagewise", action="store_true",
                         help="score each stage separately, starting it from a scripted state")
     parser.add_argument("--plan", type=Path, help="JSON plan (e.g. from the planner); default plan otherwise")
@@ -206,14 +209,14 @@ def main():
     args = parser.parse_args()
 
     plan = json.loads(args.plan.read_text(encoding="utf-8")) if args.plan else DEFAULT_PLAN
-    policy = OVActPolicy(args.policy, args.checkpoint, device=args.device)
+    policy = OVActPolicy(args.policy, args.checkpoint, device=args.device, ensemble_m=args.ensemble)
     head = None
     if args.switch == "head":
         from policy.stage_head import OVStageHead
         head = OVStageHead(args.head, device=args.device)
     if args.stagewise:
         per_stage = evaluate_stagewise(policy, args.seeds, plan, head)
-        report = {"policy": str(args.policy), "mode": "stagewise", "switch": args.switch, "seeds": args.seeds, "per_stage_success": per_stage,
+        report = {"policy": str(args.policy), "mode": "stagewise", "switch": args.switch, "ensemble": args.ensemble, "seeds": args.seeds, "per_stage_success": per_stage,
                   "policy_infer_ms_mean": round(float(np.mean(policy.infer_ms)), 3) if policy.infer_ms else None}
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")
@@ -221,7 +224,7 @@ def main():
         return
     frames = [] if args.video else None
     per_seed = evaluate(policy, args.seeds, plan, args.mode, frames, head)
-    report = {"policy": str(args.policy), "mode": args.mode, "switch": args.switch, "seeds": args.seeds,
+    report = {"policy": str(args.policy), "mode": args.mode, "switch": args.switch, "ensemble": args.ensemble, "seeds": args.seeds,
               "summary": summarise(per_seed, policy), "episodes": per_seed}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")
