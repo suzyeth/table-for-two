@@ -44,12 +44,86 @@ IK_POS_TOL = 0.004  # warn beyond this
 IK_ROT_TOL = np.deg2rad(4)
 IK_RETRY_POS = 0.0015  # retry with restarts beyond this
 IK_RETRY_ROT = np.deg2rad(2)
+# Self-collision check: the wrist, hand and wrist-camera mount against the same arm's shoulder,
+# upper arm and base (the camera mount sticks out 4-8 cm and can reach the shoulder).
+HAND_LINKS = ("wrist", "gripper", "moving_jaw_so101_v1", "camera_mount")
+BODY_LINKS = ("shoulder", "upper_arm", "base")
+SELF_CHECK_RANGE = 0.05  # distances are measured up to this; anything further reads as this
+# A sideways line-up (the hand-over receiver) must keep the arm this far clear of itself at the
+# line-up pose, on the way there and along the slide-in; otherwise the offset is turned about the
+# vertical, then shortened (measured: 5 cm straight in put the camera mount 5 mm into the
+# shoulder, 5 cm turned 40 deg left 11-20 mm).
+APPROACH_SELF_CLEARANCE = 0.008
+APPROACH_TURNS_DEG = (0, 20, -20, 40, -40, 60, -60)
+APPROACH_SCALES = (1.0, 0.8, 0.6, 0.4)
+APPROACH_CHECK_SAMPLES = 11
+# Going home is a joint-space move; if the straight one would bring the hand within this of the
+# arm itself it goes the other joints first and rolls the wrist last, up at the home posture
+# (measured: after setting the plate down, the straight move swung wrist_roll 5 rad with the arm
+# low and the left camera mount scraped the shoulder, 14.7 N on seed 4; rolling last left 9.4 mm).
+HOME_SELF_CLEARANCE = 0.005
+JOINT_ROUTE_SAMPLES = 21
+# Recording noise (data/command_noise.py) rides only on the big joint-space moves - going home and
+# the move from high up to a hover pose - fading in and out over this many control steps, so the
+# command never jumps and the hand arrives over an object with no noise left.
+FREE_SPACE_RAMP_STEPS = 10
 # Height of each object's origin above the table when it rests there.
 REST_HEIGHT = {"plate": 0.0, "mug": 0.0, "bottle": 0.0, "spoon": UTENSIL_HANDLE[2], "fork": UTENSIL_HANDLE[2]}
 
 
 def smoothstep(s):
     return s * s * (3.0 - 2.0 * s)
+
+
+def approach_candidates(offset):
+    """Line-up offsets to try, preferred first: ``offset`` itself, turned about the vertical, then shorter."""
+    offset = np.asarray(offset, dtype=float)
+    candidates = []
+    for scale in APPROACH_SCALES:
+        for turn in np.deg2rad(APPROACH_TURNS_DEG):
+            c, s = np.cos(turn), np.sin(turn)
+            candidates.append(scale * np.array([c * offset[0] - s * offset[1], s * offset[0] + c * offset[1], offset[2]]))
+    return candidates
+
+
+def free_space_gain(i, steps, ramp=FREE_SPACE_RAMP_STEPS):
+    """Noise gain at step ``i`` (1..steps) of a free-space move: ramps up, full, ramps down to 0 at the end."""
+    return max(0.0, min(1.0, i / ramp, (steps - i) / ramp))
+
+
+def joint_route(start, goal, clearance_of, needed, samples=JOINT_ROUTE_SAMPLES):
+    """(waypoints ending with ``goal``, worst clearance on them) for a joint-space move from ``start``.
+
+    The straight move if every pose on it keeps ``needed`` (``clearance_of(q)``); else the other
+    joints first and the wrist roll last; else the roll first and the other joints after; if none
+    keeps ``needed``, whichever of the three is clearest. The start itself is not scored: it is the
+    same for every route, and a start already inside the margin would tie them all.
+    """
+    start, goal = np.asarray(start, dtype=float), np.asarray(goal, dtype=float)
+    roll_last, roll_first = goal.copy(), start.copy()
+    roll_last[4], roll_first[4] = start[4], goal[4]
+    best = None
+    for route in ([goal], [roll_last, goal], [roll_first, goal]):
+        points = [start] + route
+        clearance = min(clearance_of(a + (b - a) * s)
+                        for a, b in zip(points, points[1:]) for s in np.linspace(0.0, 1.0, samples)[1:])
+        if clearance >= needed:
+            return route, clearance
+        if best is None or clearance > best[1]:
+            best = (route, clearance)
+    return best
+
+
+def first_clear(candidates, clearance_of, needed):
+    """(first candidate whose clearance is at least ``needed``, its clearance); else the clearest one."""
+    best = None
+    for candidate in candidates:
+        clearance = clearance_of(candidate)
+        if clearance >= needed:
+            return candidate, clearance
+        if best is None or clearance > best[1]:
+            best = (candidate, clearance)
+    return best
 
 
 class ArmSkills(PourMixin):
@@ -66,6 +140,8 @@ class ArmSkills(PourMixin):
         self.orient = {"approach": None}  # orientation of the last Cartesian segment
         self.release_to = GRIPPER_OPEN  # jaw opening used when letting go of the current object
         self.warnings = []
+        self.noise_gain = 0.0  # how much recording noise this arm may take right now (see free_space_gain)
+        self._free_space = False
 
     # ------------------------------------------------------- kinematics
     def _qpos(self, q=None):
@@ -92,6 +168,29 @@ class ArmSkills(PourMixin):
         body = self.ik.gripper_body
         return d.xmat[body].reshape(3, 3).T @ (self.env.object_frame(obj)[0] - d.xpos[body])
 
+    def self_clearance(self, q=None):
+        """Smallest distance (m; negative = overlap) between this arm's wrist, hand and camera mount and
+        its own shoulder, upper arm and base at arm joints ``q`` (default: the commanded ones).
+
+        Capped at SELF_CHECK_RANGE.
+        """
+        hand, body = self._self_check_geoms()
+        model, scratch = self.env.model, self.ik.scratch
+        scratch.qpos[:] = self._qpos(q)
+        mujoco.mj_kinematics(model, scratch)
+        return min(mujoco.mj_geomDistance(model, scratch, a, b, SELF_CHECK_RANGE, None) for a in hand for b in body)
+
+    def _self_check_geoms(self):
+        cached = getattr(self, "_self_geoms_cache", None)
+        if cached is None:
+            model = self.env.model
+            names = [model.body(model.geom_bodyid[g]).name for g in range(model.ngeom)]
+            collidable = [g for g in range(model.ngeom) if model.geom_contype[g] or model.geom_conaffinity[g]]
+            cached = tuple([g for g in collidable if names[g] in {self.arm + link for link in links}]
+                           for links in (HAND_LINKS, BODY_LINKS))
+            self._self_geoms_cache = cached
+        return cached
+
     def solve(self, target, orient, restarts=False):
         """IK from the commanded joints; retry with restarts if that lands off by more than a mm or two.
 
@@ -116,7 +215,9 @@ class ArmSkills(PourMixin):
         steps = max(min_steps, int(np.ceil(dist / speed * CONTROL_HZ)))
         for i in range(1, steps + 1):
             self.cmd = start + (goal - start) * smoothstep(i / steps)
+            self.noise_gain = free_space_gain(i, steps) if self._free_space else 0.0
             yield self.cmd.copy()
+        self.noise_gain = 0.0
         for _ in range(settle):
             yield self.cmd.copy()
 
@@ -183,29 +284,46 @@ class ArmSkills(PourMixin):
         rot = gripper_rotation(DOWN, orient["closing"])
         return float((rot @ (SITE_LOCAL - point))[2])
 
-    def transit(self, target, orient, grip=None):
+    def transit(self, target, orient, grip=None, q_hover=None):
         """Move the controlled point to ``target``: up, across at transit height, down.
 
         From high up (e.g. home, where the hand is not top-down and top-down poses are out
         of reach) the move to the hover pose is a joint-space move; otherwise it is a
-        straight line at transit height.
+        straight line at transit height. ``q_hover`` gives the hover joints for that
+        joint-space move (e.g. ones already checked for self-collision) instead of solving again.
         """
         yield from self.rise()
         target = np.asarray(target, dtype=float)
         hover = target.copy()
         hover[2] = max(target[2], TRANSIT_TCP_Z - self._tcp_above_point(orient))
         if self.point_world(None)[2] > TRANSIT_TCP_Z + 0.02:
-            q, _ = self.solve(hover, orient, restarts=True)
+            q = q_hover if q_hover is not None else self.solve(hover, orient, restarts=True)[0]
             self.orient = orient
-            yield from self._to(q, grip, MAX_JOINT_SPEED)
+            self._free_space = True
+            try:
+                yield from self._to(q, grip, MAX_JOINT_SPEED)
+            finally:
+                self._free_space = False
         else:
             yield from self.line(hover, orient, steps=8, speed=MAX_JOINT_SPEED, grip=grip)
         if hover[2] > target[2] + 1e-4:
             yield from self.line(target, orient, steps=4, speed=MAX_JOINT_SPEED)
 
     def home(self):
+        """Up to transit height, then a joint-space move home that keeps the hand clear of the arm itself."""
         yield from self.rise()
-        yield from self._interp(self.env.home[self.arm].copy())
+        goal = self.env.home[self.arm].copy()
+        route, clearance = joint_route(self.cmd[:5], goal[:5], self.self_clearance, HOME_SELF_CLEARANCE)
+        if clearance < HOME_SELF_CLEARANCE:
+            self.warnings.append(f"{self.arm} way home only {clearance * 1000:.1f} mm clear of the arm itself")
+        self._free_space = True
+        try:
+            for q in route:
+                waypoint = goal.copy()
+                waypoint[:5] = q
+                yield from self._interp(waypoint)
+        finally:
+            self._free_space = False
 
     # ----------------------------------------------------------- grasps
     def _choose_orientation(self, grasp, camera_side=None):
@@ -243,8 +361,18 @@ class ArmSkills(PourMixin):
         if approach_from is not None:
             # Line up beside the grasp just above its height and slide the open jaws in along
             # the object (top-down reach ends ~9 cm up, so there is no room to come from above).
+            # The line-up is turned or shortened if the arm would run into itself getting there.
             level = grasp.centre + UP * SLIDE_HEIGHT
-            yield from self.transit(level + np.asarray(approach_from, dtype=float), orient, grip=grasp.open_to)
+            hovers = {}  # offset -> the hover joints that were checked, so transit uses exactly those
+
+            def clearance_of(offset):
+                clearance, hovers[tuple(offset)] = self._approach_clearance(level, offset, orient)
+                return clearance
+
+            offset, clearance = first_clear(approach_candidates(approach_from), clearance_of, APPROACH_SELF_CLEARANCE)
+            if clearance < APPROACH_SELF_CLEARANCE:
+                self.warnings.append(f"{self.arm} line-up for {obj} only {clearance * 1000:.1f} mm clear of the arm itself")
+            yield from self.transit(level + offset, orient, grip=grasp.open_to, q_hover=hovers[tuple(offset)])
             yield from self.line(level, orient, steps=6)
         else:
             yield from self.transit(above, orient, grip=grasp.open_to)
@@ -256,6 +384,24 @@ class ArmSkills(PourMixin):
         yield from self.wait(SQUEEZE_SETTLE_STEPS)
         if lift > 0:
             yield from self.line(centre + UP * lift, orient, steps=4)
+
+    def _approach_clearance(self, level, offset, orient):
+        """(worst self clearance lining up at ``level + offset`` as ``transit`` would and sliding in to
+        ``level``, the hover joints checked); (-inf, None) if the hover pose is out of reach."""
+        target = level + offset
+        hover = target.copy()
+        hover[2] = max(target[2], TRANSIT_TCP_Z - self._tcp_above_point(orient))
+        q_hover, err = self.ik.solve(self._qpos(), hover, restarts=True, **orient)
+        if err > IK_POS_TOL:
+            return -np.inf, None
+        start = self.cmd[:5].copy()
+        worst = min(self.self_clearance(start + (q_hover - start) * s)
+                    for s in np.linspace(0.0, 1.0, APPROACH_CHECK_SAMPLES))
+        q = q_hover
+        for s in np.linspace(0.0, 1.0, APPROACH_CHECK_SAMPLES)[1:]:
+            q, _ = self.ik.solve(self._qpos(q), hover + (level - hover) * s, restarts=False, **orient)
+            worst = min(worst, self.self_clearance(q))
+        return worst, q_hover
 
     def carry(self, obj, goal, closing=None, level=False):
         """Move the held object's origin to ``goal`` with the hand top-down (optionally re-oriented).
