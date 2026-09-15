@@ -16,7 +16,8 @@ from pathlib import Path
 from data.record import FIRST_TRAIN_SEED
 from data.record_dagger import FIRST_DAGGER_SEED
 
-SEEDS_PER_EPISODE = 1.1  # the demo gate keeps about 9 in 10 seeds: refuse a range with less room than this
+# The demo gate kept 16 of 20 seeds at prop friction 0.4 (19 of 20 at 1.0): refuse a range with less room than this.
+SEEDS_PER_EPISODE = 1.25
 
 
 def plan_shards(episodes, shards, start_seed, seed_limit, root):
