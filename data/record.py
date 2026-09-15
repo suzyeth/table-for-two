@@ -1,7 +1,8 @@
 """Record scripted demonstrations of the dinner-table task as a LeRobot dataset.
 
-Each episode runs the scripted plan on a randomised seed; only fully
-successful episodes are kept. Frames are stored at 10 Hz (every second control
+Each episode runs the scripted plan on a randomised seed; only episodes that fully
+succeed and pass the demo gate (``tools/demo_gate.py``: no drop, tip, knock, arm
+hitting itself or unsafe planner warning) are kept. Frames are stored at 10 Hz (every second control
 step) with two 128x128 camera views, the 12-D joint state, the 12-D joint
 target that the script commanded, and a one-hot of the current subtask so a
 policy can be conditioned on the planner's step.
@@ -20,6 +21,8 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from sim.env import ARMS, JOINTS, DinnerTableEnv
 from sim.task import DEFAULT_INSTRUCTION, DEFAULT_PLAN, Executor
+from data.command_noise import CommandNoise, free_space_gains, noisy
+from tools.demo_gate import DemoGate, watched
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_ROOT = ROOT / "data" / "dinner_table_contact"
@@ -31,6 +34,11 @@ IMAGE_SIZE = (128, 128)
 RECORD_EVERY = 2  # 20 Hz control loop -> 10 Hz dataset
 FPS = 10
 FIRST_TRAIN_SEED = 100
+# Recording defaults, from a demo-gate sweep on training seeds 100-109: 0.02 rad of free-space
+# command noise with a 1.5x placement spread kept 9/10 (spread 1.5 alone: 9/10; uniform noise of
+# 0.01 rad: 1/10), with noise on 22% of the control steps. The evaluation scenes keep spread 1.0.
+RECORD_NOISE = 0.02
+RECORD_SPREAD = 1.5
 
 
 def stage_signature(stage):
@@ -62,13 +70,30 @@ def subtask_onehot(stage_index):
     return onehot
 
 
-def record_episode(env, executor, seed):
-    """Run one seeded episode; return (frames, success dict)."""
-    env.reset(seed)
+def skip_reason(result, defects):
+    """None if the episode may be kept; otherwise why not (failed checks, or what the demo gate found)."""
+    if not result["all"]:
+        return f"failed {[k for k, v in result.items() if not v and k != 'all']}"
+    if defects:
+        return f"defects {defects}"
+    return None
+
+
+def record_episode(env, executor, seed, noise_sigma=0.0, spread=1.0):
+    """Run one seeded episode; return (frames, success dict, demo-gate defects).
+
+    ``noise_sigma``: on free-space moves (going home, moving from high up to a hover pose) the arm
+    executes the scripted command plus slowly wandering noise (``data/command_noise.py``) while the
+    clean command is recorded as the action label.
+    ``spread``: placement spread of the table props (``DinnerTableEnv.reset``).
+    """
+    env.reset(seed, spread=spread)
     executor.reset()
     frames = []
+    gate = DemoGate(env, executor)
 
     def capture(action, stage_label):
+        gate.label = stage_label
         if env.time_step % RECORD_EVERY:
             return
         stage_index = int(stage_label.split(":", 1)[0])
@@ -82,19 +107,30 @@ def record_episode(env, executor, seed):
             frame[f"observation.images.{cam}"] = env.render(cam, IMAGE_SIZE)
         frames.append(frame)
 
-    executor.run(DEFAULT_PLAN, on_step=capture)
-    env.hold(1.0)  # score the episode once everything has come to rest
-    return frames, env.success()
+    with watched(env, gate):
+        with noisy(env, CommandNoise(noise_sigma, seed, gain=free_space_gains(executor))):
+            executor.run(DEFAULT_PLAN, on_step=capture)
+        env.hold(1.0)  # score the episode once everything has come to rest (no noise)
+    return frames, env.success(), gate.defects(executor.warnings())
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description="Record successful scripted episodes to a LeRobot dataset.")
     parser.add_argument("--episodes", type=int, default=150, help="number of successful episodes to keep")
     parser.add_argument("--start-seed", type=int, default=FIRST_TRAIN_SEED)
     parser.add_argument("--max-tries", type=int, default=200)
     parser.add_argument("--root", type=Path, default=DATA_ROOT)
     parser.add_argument("--overwrite", action="store_true", help="delete an existing dataset at --root")
-    args = parser.parse_args()
+    parser.add_argument("--noise", type=float, default=RECORD_NOISE,
+                        help="sigma (rad) of the slowly wandering noise added to the executed arm command on "
+                             "free-space moves only; the clean command stays the label")
+    parser.add_argument("--spread", type=float, default=RECORD_SPREAD,
+                        help="placement spread of the plate, mug and bottle (evaluation scenes use 1.0)")
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
 
     if args.root.exists():
         if not args.overwrite:
@@ -111,10 +147,10 @@ def main():
         if kept >= args.episodes:
             break
         tried += 1
-        frames, result = record_episode(env, executor, seed)
-        if not result["all"]:
-            failed = [k for k, v in result.items() if not v and k != "all"]
-            print(f"seed {seed}: skipped (failed {failed})")
+        frames, result, defects = record_episode(env, executor, seed, args.noise, args.spread)
+        reason = skip_reason(result, defects)
+        if reason:
+            print(f"seed {seed}: skipped ({reason})")
             continue
         for frame in frames:
             dataset.add_frame(frame)

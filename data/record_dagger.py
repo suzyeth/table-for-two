@@ -25,10 +25,12 @@ from pathlib import Path
 import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from data.record import (CAMERAS, FPS, IMAGE_SIZE, RECORD_EVERY, REPO_ID, SUBTASK_VOCAB, dataset_features,
-                         subtask_onehot)
+from data.record import (CAMERAS, FPS, IMAGE_SIZE, RECORD_EVERY, RECORD_NOISE, RECORD_SPREAD, REPO_ID,
+                         SUBTASK_VOCAB, dataset_features, skip_reason, subtask_onehot)
 from sim.env import ARMS, DinnerTableEnv
 from sim.task import DEFAULT_INSTRUCTION, DEFAULT_PLAN, Executor
+from data.command_noise import CommandNoise, free_space_gains, noisy
+from tools.demo_gate import DemoGate, watched
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_ROOT = ROOT / "data" / "dinner_table_contact_dagger"
@@ -52,11 +54,16 @@ def vocab_index(stage_label, offset):
     return int(stage_label.split(":", 1)[0]) + offset
 
 
-def run_dagger_episode(env, executor, policy, seed, split):
-    """Policy prefix, scripted (recorded) suffix. Returns (frames, success, takeover, first_failed)."""
+def run_dagger_episode(env, executor, policy, seed, split, noise_sigma=0.0, spread=1.0):
+    """Policy prefix, scripted (recorded) suffix.
+
+    Returns (frames, success, takeover, first_failed, defects); ``defects`` is what the demo gate
+    found in the recorded suffix only (the policy prefix is not recorded). ``noise_sigma`` and
+    ``spread`` are as in ``data.record``; the noise is added to the scripted suffix only.
+    """
     from policy.rollout import run_stage_policy  # imported here: rollout pulls in OpenVINO
 
-    env.reset(seed)
+    env.reset(seed, spread=spread)
     executor.reset()
     first_failed = None
     for index, stage in enumerate(DEFAULT_PLAN[:split]):
@@ -67,9 +74,14 @@ def run_dagger_episode(env, executor, policy, seed, split):
 
     for arm in ARMS:  # the scripted skills continue from the policy's last command, not from home
         executor.skills[arm].cmd = env.data.ctrl[env.act_idx[arm]].copy()
+    # Not recorded: whatever the policy left moving (a failed stage ends without the evaluator's
+    # confirmation hold) comes to rest first, so the gate does not blame the scripted suffix for it.
+    env.hold(1.0)
     frames = []
+    gate = DemoGate(env, executor)
 
     def capture(action, stage_label):
+        gate.label = stage_label
         if env.time_step % RECORD_EVERY:
             return
         frame = {
@@ -82,14 +94,14 @@ def run_dagger_episode(env, executor, policy, seed, split):
             frame[f"observation.images.{cam}"] = env.render(cam, IMAGE_SIZE)
         frames.append(frame)
 
-    executor.run(DEFAULT_PLAN[takeover:], on_step=capture)
-    env.hold(1.0)
-    return frames, env.success(), takeover, first_failed
+    with watched(env, gate):
+        with noisy(env, CommandNoise(noise_sigma, seed, gain=free_space_gains(executor))):
+            executor.run(DEFAULT_PLAN[takeover:], on_step=capture)
+        env.hold(1.0)
+    return frames, env.success(), takeover, first_failed, gate.defects(executor.warnings())
 
 
-def main():
-    from policy.ov_policy import OVActPolicy
-
+def build_parser():
     parser = argparse.ArgumentParser(description="Record scripted corrections from policy-reached states.")
     parser.add_argument("--episodes", type=int, default=100, help="number of successful corrective episodes to keep")
     parser.add_argument("--start-seed", type=int, default=FIRST_DAGGER_SEED)
@@ -102,7 +114,16 @@ def main():
     parser.add_argument("--ensemble", type=float, default=None, metavar="M", help="temporal ensembling coefficient")
     parser.add_argument("--splits", default=",".join(map(str, SPLIT_STAGES)),
                         help="comma-separated takeover stages to cycle over (default: empty-handed boundaries)")
-    args = parser.parse_args()
+    parser.add_argument("--noise", type=float, default=RECORD_NOISE,
+                        help="command noise sigma (rad) on the scripted suffix's free-space moves")
+    parser.add_argument("--spread", type=float, default=RECORD_SPREAD, help="placement spread of the table props")
+    return parser
+
+
+def main():
+    from policy.ov_policy import OVActPolicy
+
+    args = build_parser().parse_args()
     splits = tuple(int(x) for x in args.splits.split(","))
 
     if args.root.exists():
@@ -123,11 +144,12 @@ def main():
             break
         tried += 1
         split = split_stage(seed, splits)
-        frames, result, takeover, first_failed = run_dagger_episode(env, executor, policy, seed, split)
+        frames, result, takeover, first_failed, defects = run_dagger_episode(env, executor, policy, seed, split,
+                                                                             args.noise, args.spread)
         why = f"policy failed stage {first_failed}" if first_failed is not None else f"split at {split}"
-        if not result["all"]:
-            failed = [k for k, v in result.items() if not v and k != "all"]
-            print(f"seed {seed}: skipped, scripted suffix from stage {takeover} ({why}) failed {failed}")
+        reason = skip_reason(result, defects)
+        if reason:
+            print(f"seed {seed}: skipped, scripted suffix from stage {takeover} ({why}) {reason}")
             continue
         for frame in frames:
             dataset.add_frame(frame)
