@@ -38,10 +38,13 @@ class FakeEnv:
         self.tilt = 14.0
 
     def tilt_deg(self, obj):
-        return self.tilt
+        return self.tilt if obj == "plate" else 0.0
 
     def object_frame(self, obj):
         return np.zeros(3), np.eye(3)
+
+    def holder(self, obj):
+        return None
 
 
 def test_monitor_records_the_tilt_one_settle_period_after_the_release(monkeypatch):

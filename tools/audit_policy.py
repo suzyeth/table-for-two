@@ -11,10 +11,13 @@ Each release is classified:
   gentle   it fell at most GENTLE_DROP_MM and landed no faster than GENTLE_IMPACT_MPS;
   dropped  anything else (including an object lost while the jaws were still squeezing);
   tipped   came to rest more than UPRIGHT_TOL_DEG off upright (plate, mug, bottle).
-Separately, a prop that is not held and not falling from a release but moves faster than
-KNOCK_SPEED_MPS is followed until it is at rest again:
+Separately, a prop that is not held, not being grasped and not falling from a release, but
+moves faster than KNOCK_SPEED_MPS or tilts more than ROCK_TILT_DEG off its resting tilt, is
+followed until it is at rest again - also while a hand is touching it, so a gripper shoving
+the mug is seen while it shoves (and named in ``hit_by``):
   knocked  something other than the table and the water touched it (``hit_by``: an arm, the
-           bottle, another prop) or it ended up more than KNOCK_MOVED_MM from where it was;
+           bottle, another prop), it ended up more than KNOCK_MOVED_MM from where it was, or it
+           rocked more than ROCK_TILT_DEG (a mug rocking on its base edge barely moves its origin);
   jostled  only the table and the water beads touched it and it barely moved - the beads
            landing in the mug make it twitch, which is not the robot hitting anything.
 
@@ -32,7 +35,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from data.record import SUBTASK_VOCAB, stage_signature
-from sim.env import ARMS, PROPS, UPRIGHT_TOL_DEG
+from sim.env import ARMS, PROPS, UPRIGHT_TOL_DEG, UTENSILS
 from sim.task import DEFAULT_PLAN
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,6 +45,8 @@ CONFIRM_SECONDS = 1.0
 KNOCK_SPEED_MPS = 0.15  # an unheld prop moving faster than this is followed as a possible knock
 KNOCK_REST_MPS = 0.02  # ... until it is supported and slower than this
 KNOCK_MOVED_MM = 2.0  # ... and it counts as knocked if it ended up further than this from where it was
+ROCK_TILT_DEG = 2.0  # an unheld plate / mug / bottle tilting this far off its resting tilt is followed too
+SETTLED_TILT_STEP_DEG = 0.1  # ... and is at rest only once its tilt changes less than this per control step
 RELEASE_GRACE_STEPS = 10  # motion within 0.5 s of a release belongs to that release, not a knock
 SETTLE_STEPS = 20  # 1 s after a release the object has come to rest; its tilt is judged then
 KINDS = ("placed", "gentle", "dropped", "tipped", "knocked", "jostled")
@@ -81,15 +86,15 @@ def classify(event, max_drop_mm=GENTLE_DROP_MM, max_impact_mps=GENTLE_IMPACT_MPS
     return "tipped" if tipped else "gentle"
 
 
-def motion_kind(hit_by, moved_mm):
-    """'knocked' if something other than table/water touched it or it was displaced; else 'jostled'."""
-    if hit_by or moved_mm is None or moved_mm > KNOCK_MOVED_MM:
+def motion_kind(hit_by, moved_mm, tilt_change_deg=0.0):
+    """'knocked' if something other than table/water touched it, it was displaced or it rocked; else 'jostled'."""
+    if hit_by or moved_mm is None or moved_mm > KNOCK_MOVED_MM or tilt_change_deg > ROCK_TILT_DEG:
         return "knocked"
     return "jostled"
 
 
 class KnockMonitor:
-    """Props that move fast without being held and without falling from a release.
+    """Props that move or rock without being held, grasped or falling from a release.
 
     It also records each released object's tilt SETTLE_STEPS after the release
     (``settled_tilt_deg``), which ``classify`` uses to judge tipping.
@@ -97,7 +102,9 @@ class KnockMonitor:
 
     def __init__(self, env, watcher):
         self.env, self.watcher = env, watcher
-        self.moving = {}  # obj -> {"stage", "z0", "xy0", "max_speed", "hit_by", "water"}
+        self.moving = {}  # obj -> {"stage", "z0", "xy0", "max_speed", "max_tilt_change", "last_tilt", "hit_by", "water"}
+        self.rest_tilt = {}  # obj -> tilt while it was last at rest (None for utensils)
+        self.last_tilt = {}  # obj -> tilt at the previous control step it was watched
         self.events = []
         self.steps = 0
         self.last_release = {}  # obj -> control step of its latest release
@@ -105,8 +112,6 @@ class KnockMonitor:
         self.pending_tilt = []  # (release event, control step at which to measure its settled tilt)
 
     def step(self, stage):
-        from tools.audit_contact import supports, velocity
-
         self.steps += 1
         for event in self.watcher.events[self.seen_releases:]:
             self.last_release[event["object"]] = self.steps
@@ -118,26 +123,55 @@ class KnockMonitor:
                 event["settled_tilt_deg"] = round(float(self.env.tilt_deg(event["object"])), 1)
         self.pending_tilt = [(e, due) for e, due in self.pending_tilt if due > self.steps]
         for obj in PROPS:
-            if obj in self.watcher.hold or obj in self.watcher.falling or self.watcher.touching_arms(obj):
-                self.moving.pop(obj, None)
-                continue
-            if self.steps - self.last_release.get(obj, -RELEASE_GRACE_STEPS) < RELEASE_GRACE_STEPS:
-                continue
-            speed = float(np.linalg.norm(velocity(self.env, obj)))
-            pos = self.env.object_frame(obj)[0]
-            if obj in self.moving:
-                moving = self.moving[obj]
-                moving["max_speed"] = max(moving["max_speed"], speed)
-                hit, water = self._touching(obj)
-                moving["hit_by"] |= hit
-                moving["water"] = moving["water"] or water
-                if speed < KNOCK_REST_MPS and supports(self.env, obj):
-                    self.events.append(self._event(obj, moving, pos, still_moving=False))
-                    del self.moving[obj]
-            elif speed > KNOCK_SPEED_MPS:
-                hit, water = self._touching(obj)
-                self.moving[obj] = {"stage": stage, "z0": float(pos[2]), "xy0": np.array(pos[:2], dtype=float),
-                                    "max_speed": speed, "hit_by": hit, "water": water}
+            self._step_prop(obj, stage)
+
+    def _step_prop(self, obj, stage):
+        from tools.audit_contact import supports, velocity
+
+        # A hand merely touching a prop does not hide it: only holding, grasping (both jaws of one
+        # arm on it) or falling from a release does. A shove that ends in a grasp is still reported.
+        falling = obj in self.watcher.falling
+        if falling or obj in self.watcher.hold or self.env.holder(obj) is not None:
+            moving = self.moving.pop(obj, None)
+            if moving is not None and not falling:
+                self.events.append(self._event(obj, moving, self.env.object_frame(obj)[0], still_moving=False,
+                                               ended_in_grasp=True))
+            self.rest_tilt.pop(obj, None)
+            self.last_tilt.pop(obj, None)
+            return
+        tilt = None if obj in UTENSILS else float(self.env.tilt_deg(obj))
+        seen_before, previous_tilt = obj in self.last_tilt, self.last_tilt.get(obj)
+        self.last_tilt[obj] = tilt
+        if self.steps - self.last_release.get(obj, -RELEASE_GRACE_STEPS) < RELEASE_GRACE_STEPS:
+            self.rest_tilt.pop(obj, None)
+            return
+        speed = float(np.linalg.norm(velocity(self.env, obj)))
+        pos = self.env.object_frame(obj)[0]
+        if obj not in self.rest_tilt and obj not in self.moving:
+            # The resting tilt is taken only once the prop is still: after a release it may still be toppling.
+            still_tilt = tilt is None or (seen_before and abs(tilt - previous_tilt) < SETTLED_TILT_STEP_DEG)
+            if still_tilt and speed < KNOCK_SPEED_MPS:
+                self.rest_tilt[obj] = tilt
+        rest_tilt = self.rest_tilt.get(obj)
+        tilt_change = 0.0 if tilt is None or rest_tilt is None else abs(tilt - rest_tilt)
+        if obj in self.moving:
+            moving = self.moving[obj]
+            moving["max_speed"] = max(moving["max_speed"], speed)
+            moving["max_tilt_change"] = max(moving["max_tilt_change"], tilt_change)
+            hit, water = self._touching(obj)
+            moving["hit_by"] |= hit
+            moving["water"] = moving["water"] or water
+            settled = tilt is None or abs(tilt - moving["last_tilt"]) < SETTLED_TILT_STEP_DEG
+            moving["last_tilt"] = tilt
+            if speed < KNOCK_REST_MPS and settled and supports(self.env, obj):
+                self.events.append(self._event(obj, moving, pos, still_moving=False))
+                del self.moving[obj]
+                self.rest_tilt[obj] = tilt
+        elif speed > KNOCK_SPEED_MPS or tilt_change > ROCK_TILT_DEG:
+            hit, water = self._touching(obj)
+            self.moving[obj] = {"stage": stage, "z0": float(pos[2]), "xy0": np.array(pos[:2], dtype=float),
+                                "max_speed": speed, "max_tilt_change": tilt_change, "last_tilt": tilt,
+                                "hit_by": hit, "water": water}
 
     def _touching(self, obj):
         """(names of everything touching ``obj`` except the table and the water, water touching?)."""
@@ -146,14 +180,21 @@ class KnockMonitor:
         water = any(n and n.startswith("water_") for n in names)
         return {n for n in names if n and n != "table" and not n.startswith("water_")}, water
 
-    def _event(self, obj, moving, pos, still_moving):
+    def _event(self, obj, moving, pos, still_moving, ended_in_grasp=False):
+        """A finished (or unfinished) motion. One that ended in a grasp is judged only on how far it
+        moved or rocked: the hand touching it is expected then."""
         moved_mm = float(np.linalg.norm(np.asarray(pos[:2], dtype=float) - moving["xy0"]) * 1000)
-        event = {"object": obj, "kind": motion_kind(moving["hit_by"], moved_mm), "stage": moving["stage"],
+        tilt_change = moving["max_tilt_change"]
+        kind = motion_kind(set() if ended_in_grasp else moving["hit_by"], moved_mm, tilt_change)
+        event = {"object": obj, "kind": kind, "stage": moving["stage"],
                  "max_speed_mps": round(moving["max_speed"], 3), "moved_mm": round(moved_mm, 1),
+                 "max_tilt_change_deg": round(tilt_change, 1),
                  "height_change_mm": round((float(pos[2]) - moving["z0"]) * 1000, 1),
                  "hit_by": sorted(moving["hit_by"]), "water_contact": bool(moving["water"])}
         if still_moving:
             event["still_moving_at_end"] = True
+        if ended_in_grasp:
+            event["ended_in_grasp"] = True
         return event
 
     def finish(self):
@@ -231,6 +272,11 @@ def audit_seed(env, policy, seed, plan=DEFAULT_PLAN, executor=None):
     return watcher.events + knocks.events, stage_ok, env.success()
 
 
+def save_report(report, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=1), encoding="utf-8")
+
+
 def main():
     from sim.env import DinnerTableEnv
     from sim.task import Executor
@@ -264,7 +310,7 @@ def main():
         report["seeds"][seed] = {"events": events, "stage_ok": stage_ok, "success": success}
         drops = [f"{e['object']} {e.get('drop_height_mm', '?')} mm @ {e.get('drop_impact_speed_mps', '?')} m/s"
                  for e in events if e["kind"] == "dropped"]
-        knocked = [f"{e['object']} {e['moved_mm']} mm by {e['hit_by'] or 'nothing'}"
+        knocked = [f"{e['object']} {e['moved_mm']} mm / {e['max_tilt_change_deg']} deg by {e['hit_by'] or 'nothing'}"
                    for e in events if e["kind"] == "knocked"]
         jostled = sum(e["kind"] == "jostled" for e in events)
         tipped = [e["object"] for e in events if e["kind"] == "tipped"]
@@ -272,10 +318,9 @@ def main():
         stages = f"{sum(stage_ok)}/{len(stage_ok)}" if stage_ok else "scripted"
         print(f"seed {seed}: stages {stages} full={success['all']} releases {releases} dropped {drops} "
               f"tipped {tipped} knocked {knocked} jostled-by-water {jostled}", flush=True)
+        report["summary"] = summarize(all_events)
+        save_report(report, args.out)  # after every seed, so a crash keeps what was already measured
     env.close()
-    report["summary"] = summarize(all_events)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")
     print(json.dumps(report["summary"], indent=1))
 
 

@@ -28,6 +28,9 @@ class FakeEnv:
     def tilt_deg(self, obj):
         return 0.0
 
+    def holder(self, obj):
+        return None
+
 
 class FakeWatcher:
     def __init__(self):
