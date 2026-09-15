@@ -118,7 +118,13 @@ class DinnerTableEnv:
             home[arm] = np.append(q, GRIPPER_OPEN)
         return home
 
-    def reset(self, seed=0):
+    def reset(self, seed=0, spread=1.0):
+        """Randomise the scene for ``seed`` (seed 0 is the nominal scene).
+
+        ``spread`` scales the placement jitter of the plate, mug and bottle, so recordings can cover
+        more than the evaluation scenes (which keep the default 1.0); the utensils keep their range,
+        because the drawer leaves only ~6 mm beside each of them for the fingers.
+        """
         m, d = self.model, self.data
         rng = np.random.default_rng(seed)
         m.body_mass[:] = self._mass0
@@ -137,7 +143,7 @@ class DinnerTableEnv:
         if seed:  # seed 0 is the nominal scene
             for obj in PROPS:
                 adr = self.free_qadr[obj]
-                jitter = XY_JITTER[obj]
+                jitter = XY_JITTER[obj] * (1.0 if obj in UTENSILS else spread)
                 offset = rng.uniform(-jitter, jitter, 2)
                 d.qpos[adr:adr + 2] += offset
                 if obj == "bottle":  # the water travels with the bottle
@@ -160,7 +166,13 @@ class DinnerTableEnv:
             grip_s = rng.uniform(*FRICTION_SCALE)
             m.geom_friction[self.pad_geoms, 0] *= grip_s
             variation["grip_friction_scale"] = round(grip_s, 3)
-            mujoco.mj_setConst(m, d)  # refresh mass-derived constants after the mass scaling
+            # Refresh mass-derived constants after the mass scaling. mj_setConst works from qpos0 in
+            # ``d`` and leaves it there, which silently undid the placement jitter above (every seed
+            # used to put every prop exactly where seed 0 does), so the jittered state is put back.
+            placed = d.qpos.copy()
+            mujoco.mj_setConst(m, d)
+            d.qpos[:] = placed
+            d.qvel[:] = 0.0
             light_s = rng.uniform(*LIGHT_SCALE)
             m.light_diffuse[:] *= light_s
             m.vis.headlight.diffuse[:] *= light_s
@@ -241,9 +253,12 @@ class DinnerTableEnv:
         return None
 
     def supported(self, obj):
-        """True if ``obj`` touches anything other than the fingers (table, plate, drawer, ...)."""
-        fingers = set().union(*self.finger_bodies.values())
-        return bool(self._contact_bodies(obj) - fingers)
+        """True if ``obj`` touches anything other than the fingers and the water (table, plate, drawer, ...).
+
+        Beads left inside a bottle after the pour touch its walls; they are not something it stands on.
+        """
+        not_support = set().union(*self.finger_bodies.values()) | {int(b) for b in self.water_ids}
+        return bool(self._contact_bodies(obj) - not_support)
 
     def centre_of_mass(self, obj):
         return self.data.xipos[self.body_ids[obj]].copy()
