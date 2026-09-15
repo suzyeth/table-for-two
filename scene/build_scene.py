@@ -300,6 +300,10 @@ def build_spec():
     spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
     spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
     spec.option.impratio = 10
+    # No multisample anti-aliasing: with it (MuJoCo's default 4x) the same state rendered 1-5 wrist-camera
+    # pixels one grey level differently from one render to the next, and the closed loop grew that into
+    # a different rollout for the same seed. Without it every render of a state is identical.
+    spec.visual.quality.offsamples = 0
     add_environment(spec)
     add_cabinet(spec)
     add_plate(spec)
