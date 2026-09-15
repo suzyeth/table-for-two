@@ -43,6 +43,12 @@ def _unit(vector):
     return vector / np.linalg.norm(vector)
 
 
+def _cross3(a, b):
+    """``np.cross`` for two 3-vectors, same arithmetic and result, without its per-call overhead
+    (which was ~30% of all IK time)."""
+    return np.array([a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]])
+
+
 class ArmIK:
     """IK helper bound to one arm prefix; works on a scratch MjData copy."""
 
@@ -83,7 +89,7 @@ class ArmIK:
         rot_err = np.zeros(3)
         rot = data.xmat[self.gripper_body].reshape(3, 3)
         for local_column, sign, desired in axes:
-            rot_err += np.cross(sign * rot[:, local_column], desired)
+            rot_err += _cross3(sign * rot[:, local_column], desired)
         return pos_err, rot_err
 
     def _descend(self, qpos_full, q_start, target, axes, point, rot_weight):
@@ -94,6 +100,7 @@ class ArmIK:
         jacp = np.zeros((3, self.model.nv))
         jacr = np.zeros((3, self.model.nv))
         oriented = bool(axes)
+        damping = DAMPING * np.eye(6 if oriented else 3)
         for _ in range(MAX_ITERS):
             d.qpos[self.qpos_adr] = q
             mujoco.mj_kinematics(self.model, d)
@@ -115,7 +122,7 @@ class ArmIK:
                 rows.append(rot_weight * jacr[:, self.dof_adr])
                 errs.append(rot_weight * rot_err)
             jac, err = np.vstack(rows), np.concatenate(errs)
-            dq = jac.T @ np.linalg.solve(jac @ jac.T + DAMPING * np.eye(jac.shape[0]), err)
+            dq = jac.T @ np.linalg.solve(jac @ jac.T + damping, err)
             q = np.clip(q + STEP * dq, self.lo, self.hi)
         return best
 
