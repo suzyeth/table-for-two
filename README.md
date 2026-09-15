@@ -138,7 +138,12 @@ through precondition completion or the keyword fallback):
 
 **Learned policy (v1: 150 demonstrations, 40k steps, four cameras).** Stage
 success on the ten evaluation seeds (`policy/rollout.py`; a stage counts only
-if the policy finished it inside 40 s; `home` stages are not scored):
+if the policy finished it inside 40 s; `home` stages are not scored). Measured
+in the earlier scene (prop friction 1.0, 4x anti-aliased cameras): there, the
+wrist-camera renders were not bit-exact, so the same seed could give a
+different rollout, and with 10 seeds a rate's 95% interval is about ±0.25 -
+read single cells with care. `policy/rollout.py` now scores 30 unseen seeds
+(1000–1029) with Wilson intervals in the current scene:
 
 | Stage | Chained, action queue | Chained, temporal ensemble | Each stage from a scripted start | Chained, INT8 |
 |---|---|---|---|---|
@@ -295,15 +300,21 @@ Download the trained checkpoint and OpenVINO IRs from the GitHub release
 `models/policy/`, or retrain:
 
 ```bash
-python -m data.record --episodes 150                 # ~2.5 h; 4 cameras at 10 Hz -> data/dinner_table_contact/
-python -m policy.train --steps 40000                 # ~3.5 h on an RTX 4060 (install with --cuda); --device cpu works but takes days
-python -m policy.export_openvino                     # FP32 / FP16 / INT8 IR + accuracy report, a few minutes
-python -m policy.rollout --mode policy               # learned policy alone, seeds 0-9, 40 s per stage
-python -m policy.rollout --mode hybrid               # a scripted skill finishes any timed-out stage (counted as assisted)
-python -m policy.rollout --stagewise                 # each stage from a scripted start state
-python -m policy.stage_head train && python -m policy.stage_head export   # stage-completion head (~10 min GPU)
-python -m policy.rollout --mode policy --switch head # the policy side ends each stage; the oracle only scores
-python -m policy.rollout --mode policy --ensemble 0.01 # temporal ensembling: infer every step, blend overlapping chunks
+# Every command takes its data / model paths explicitly (no silent defaults to an older model).
+python -m tools.record_parallel --root data/contact_v3 --episodes 300   # 8 recorder processes, ~1-1.5 h -> data/contact_v3/merged
+python -m policy.train --dataset-root data/contact_v3/merged --output-dir outputs/act_contact_v3 --steps 40000
+                                                     # ~3.5 h on an RTX 4060 (install with --cuda); --device cpu works but takes days
+python -m policy.export_openvino --checkpoint outputs/act_contact_v3/checkpoints/040000/pretrained_model \
+    --dataset-root data/contact_v3/merged --out-dir models/policy_v3   # FP32 / FP16 / INT8 IR + accuracy report
+P="--policy models/policy_v3/act_fp32.xml --checkpoint outputs/act_contact_v3/checkpoints/040000/pretrained_model"
+python -m policy.rollout $P --mode policy            # learned policy alone on 30 unseen scenes (seeds 1000-1029),
+                                                     # every rate with a 95% Wilson interval; 40 s per stage
+python -m policy.rollout $P --mode hybrid            # a scripted skill finishes any timed-out stage (counted as assisted)
+python -m policy.rollout $P --stagewise              # each stage from a scripted start state
+python -m policy.stage_head train --dataset-root data/contact_v3/merged   # stage-completion head (~10 min GPU)
+python -m policy.stage_head export --dataset-root data/contact_v3/merged
+python -m policy.rollout $P --mode policy --switch head   # the policy side ends each stage; the oracle only scores
+python -m policy.rollout $P --mode policy --ensemble 0.01 # temporal ensembling: infer every step, blend overlapping chunks
 python -m bench.benchmark                            # planner + every IR in models/policy on CPU / iGPU / NPU
 ```
 

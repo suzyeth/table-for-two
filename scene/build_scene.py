@@ -51,7 +51,11 @@ CABINET_RGBA = [0.85, 0.85, 0.82, 1.0]
 DRAWER_RGBA = [0.75, 0.6, 0.45, 1.0]
 STEEL = [0.72, 0.73, 0.78, 1.0]
 CERAMIC = [0.95, 0.95, 0.95, 1.0]
-PROP_FRICTION = [1.0, 0.005, 0.0001]
+# Sliding friction of the table, drawer and every prop: ceramic or glass on wood is ~0.4. MuJoCo takes
+# the larger of two contacting geoms' friction, so the table alone could not lower prop-on-table
+# friction (it was 1.0-1.3 with every geom at 1.0) - the props must be lowered too. The beads (0.3)
+# now meet the bottle and mug walls at 0.4; grasps are unaffected (the pads have contact priority).
+PROP_FRICTION = [0.4, 0.005, 0.0001]
 # Gripper: sustained torque of a 7.4 V STS3215 (stall 1.62 N m; ~half of that without tripping
 # its overload protection) and rubber finger pads (mu ~0.8 on ceramic/plastic). The pads'
 # friction is what every finger-object contact uses (the pad geoms have contact priority), and
@@ -184,8 +188,8 @@ def add_shell(spec, name, params, extra_geoms=()):
                       friction=PROP_FRICTION, condim=4, rgba=params["rgba"])
     body.add_geom(name=f"{name}_base", type=CYLINDER, size=[r, SHELL_BASE_HALF], pos=[0, 0, SHELL_BASE_HALF],
                   mass=params["mass"] * 0.2, friction=PROP_FRICTION, condim=4, rgba=params["rgba"])
-    for geom in extra_geoms:
-        body.add_geom(**geom)
+    for geom in extra_geoms:  # e.g. the mug handle: the prop's friction unless a geom says otherwise
+        body.add_geom(**{"friction": PROP_FRICTION, **geom})
     return body
 
 
