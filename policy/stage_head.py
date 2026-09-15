@@ -22,14 +22,14 @@ import numpy as np
 import torch
 from torch import nn
 
-from data.record import CAMERAS, DATA_ROOT, IMAGE_SIZE, REPO_ID, SUBTASK_VOCAB
+from data.record import CAMERAS, IMAGE_SIZE, REPO_ID, STATE_NAMES, SUBTASK_VOCAB
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "models" / "stage_head"
 DONE_WINDOW = 10  # frames (1 s at 10 Hz) before a stage boundary that count as "done"
 DONE_STREAK = 5  # consecutive "done" calls (0.5 s) before the stage advances at rollout
 HELD_OUT_EPISODES = 15
-STATE_DIM = 12
+STATE_DIM = len(STATE_NAMES)  # joint positions and velocities (data/record.py)
 IMAGE_KEYS = tuple(f"observation.images.{cam}" for cam in CAMERAS)
 
 
@@ -231,13 +231,18 @@ class OVStageHead:
         return self.streak >= self.streak_needed
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description="Train / export the stage-completion head.")
     parser.add_argument("command", choices=("train", "export"))
-    parser.add_argument("--dataset-root", type=Path, default=DATA_ROOT)
+    # Required: the old default was the single-layout dataset recorded before the placement fix.
+    parser.add_argument("--dataset-root", type=Path, required=True, help="the dataset the policy was trained on")
     parser.add_argument("--steps", type=int, default=3000)
     parser.add_argument("--batch-size", type=int, default=64)
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
     (train if args.command == "train" else export)(args)
 
 

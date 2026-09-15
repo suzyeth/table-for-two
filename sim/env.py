@@ -77,6 +77,7 @@ class DinnerTableEnv:
         m = self.model
         self.act_idx = {a: np.array([m.actuator(a + j).id for j in JOINTS]) for a in ARMS}
         self.qpos_idx = {a: np.array([m.jnt_qposadr[m.joint(a + j).id] for j in JOINTS]) for a in ARMS}
+        self.dof_idx = {a: np.array([m.jnt_dofadr[m.joint(a + j).id] for j in JOINTS]) for a in ARMS}
         self.body_ids = {o: m.body(o).id for o in PROPS + ("drawer",)}
         self.tcp_site = {a: m.site(a + "gripperframe").id for a in ARMS}
         self.handle_geom = m.geom("drawer_handle").id
@@ -214,6 +215,10 @@ class DinnerTableEnv:
 
     def joint_state(self):
         return np.concatenate([self.arm_qpos(a) for a in ARMS])
+
+    def joint_velocity(self):
+        """The 12 arm joint velocities (left 6 then right 6), rad/s."""
+        return np.concatenate([self.data.qvel[self.dof_idx[a]] for a in ARMS])
 
     def tcp(self, arm):
         return self.data.site_xpos[self.tcp_site[arm]].copy()

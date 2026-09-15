@@ -16,6 +16,7 @@ merges with it through ``tools/aggregate_contact.py``.
 
 Run:  .venv\\Scripts\\python.exe -m data.record_dagger --episodes 100 --policy models/policy_v2/act_fp32.xml
         --checkpoint outputs/act_contact_v2/checkpoints/060000/pretrained_model --ensemble 0.01
+        --root data/dinner_table_contact_dagger
 """
 import argparse
 import shutil
@@ -26,14 +27,13 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from data.record import (CAMERAS, FPS, IMAGE_SIZE, RECORD_EVERY, RECORD_NOISE, RECORD_SPREAD, REPO_ID,
-                         SUBTASK_VOCAB, dataset_features, skip_reason, subtask_onehot)
+                         SUBTASK_VOCAB, dataset_features, policy_state, skip_reason, subtask_onehot)
 from sim.env import ARMS, DinnerTableEnv
 from sim.task import DEFAULT_INSTRUCTION, DEFAULT_PLAN, Executor
 from data.command_noise import CommandNoise, free_space_gains, noisy
 from tools.demo_gate import DemoGate, watched
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_ROOT = ROOT / "data" / "dinner_table_contact_dagger"
 FIRST_DAGGER_SEED = 500  # plain demos use 100-449; evaluation seeds 0-9 and 1000-1029 stay unseen
 SPLIT_STAGES = (1, 2, 5)  # stage boundaries where both hands are empty: a scripted skill cannot take over a grasp
 # the policy made (stages 3 and 4 start with the bottle in hand), and stage 0 has nothing policy-made yet.
@@ -85,7 +85,7 @@ def run_dagger_episode(env, executor, policy, seed, split, noise_sigma=0.0, spre
         if env.time_step % RECORD_EVERY:
             return
         frame = {
-            "observation.state": env.joint_state().astype(np.float32),
+            "observation.state": policy_state(env),
             "observation.environment_state": subtask_onehot(vocab_index(stage_label, takeover)),
             "action": np.asarray(action, dtype=np.float32),
             "task": DEFAULT_INSTRUCTION,
@@ -106,7 +106,8 @@ def build_parser():
     parser.add_argument("--episodes", type=int, default=100, help="number of successful corrective episodes to keep")
     parser.add_argument("--start-seed", type=int, default=FIRST_DAGGER_SEED)
     parser.add_argument("--max-tries", type=int, default=160)
-    parser.add_argument("--root", type=Path, default=DATA_ROOT)
+    # Required: with --overwrite a forgotten --root would delete the dataset at a default path.
+    parser.add_argument("--root", type=Path, required=True, help="new dataset directory")
     parser.add_argument("--overwrite", action="store_true", help="delete an existing dataset at --root")
     parser.add_argument("--policy", type=Path, required=True, help="OpenVINO IR of the policy that drives the prefix")
     parser.add_argument("--checkpoint", type=Path, required=True, help="its LeRobot pretrained_model directory")

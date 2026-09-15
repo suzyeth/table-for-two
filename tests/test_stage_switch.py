@@ -25,6 +25,9 @@ class FakeEnv:
     def joint_state(self):
         return np.zeros(12)
 
+    def joint_velocity(self):
+        return np.ones(12)
+
     def step(self, action):
         self.steps += 1
 
@@ -69,6 +72,18 @@ def test_after_the_check_passes_the_same_stage_runs_on_until_the_arms_are_still(
     assert run(monkeypatch, policy, done=lambda calls: calls >= 3) is True
     assert policy.calls == 20 + SETTLE_STILL_STEPS
     assert all(np.array_equal(o, policy.onehots[0]) for o in policy.onehots)  # same subtask throughout
+
+
+def test_the_policy_is_given_joint_positions_and_velocities(monkeypatch):
+    seen = []
+
+    class RecordingPolicy(MovingThenStillPolicy):
+        def select_action(self, state, onehot, images):
+            seen.append(np.asarray(state))
+            return super().select_action(state, onehot, images)
+
+    run(monkeypatch, RecordingPolicy(moving=1), done=lambda calls: calls >= 1, settle=None)
+    assert seen and seen[0].shape == (24,) and np.all(seen[0][12:] == 1.0)
 
 
 def test_arms_that_never_settle_end_the_stage_after_the_settle_limit(monkeypatch):

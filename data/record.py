@@ -9,7 +9,8 @@ policy can be conditioned on the planner's step.
 
 Training seeds start at 100 so the evaluation seeds 0-9 stay unseen.
 
-Run:  .venv\\Scripts\\python.exe -m data.record --episodes 50 --overwrite
+Run:  .venv\\Scripts\\python.exe -m data.record --episodes 50 --root data\\my_dataset --overwrite
+      (for a full dataset use tools/record_parallel.py, which runs several of these side by side)
 """
 import argparse
 import shutil
@@ -25,7 +26,6 @@ from data.command_noise import CommandNoise, free_space_gains, noisy
 from tools.demo_gate import DemoGate, watched
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_ROOT = ROOT / "data" / "dinner_table_contact"
 REPO_ID = "local/bimanual_dinner_table_contact"
 # Two scene views plus a camera on each wrist: with contact-only grasps the policy has to
 # see how the jaws sit on the object, which the scene cameras barely resolve.
@@ -49,11 +49,19 @@ def stage_signature(stage):
 
 SUBTASK_VOCAB = [stage_signature(stage) for stage in DEFAULT_PLAN]
 JOINT_NAMES = [f"{arm}{joint}" for arm in ARMS for joint in JOINTS]
+# The policy sees joint velocities as well as positions: from one frame and positions alone it
+# could not time the pour's tilt against the water flow (review 2).
+STATE_NAMES = JOINT_NAMES + [f"{name}.vel" for name in JOINT_NAMES]
+
+
+def policy_state(env):
+    """``observation.state``: the 12 joint positions, then the 12 joint velocities (float32)."""
+    return np.concatenate([env.joint_state(), env.joint_velocity()]).astype(np.float32)
 
 
 def dataset_features():
     features = {
-        "observation.state": {"dtype": "float32", "shape": (len(JOINT_NAMES),), "names": JOINT_NAMES},
+        "observation.state": {"dtype": "float32", "shape": (len(STATE_NAMES),), "names": STATE_NAMES},
         "observation.environment_state": {"dtype": "float32", "shape": (len(SUBTASK_VOCAB),),
                                           "names": SUBTASK_VOCAB},
         "action": {"dtype": "float32", "shape": (len(JOINT_NAMES),), "names": JOINT_NAMES},
@@ -79,6 +87,23 @@ def skip_reason(result, defects):
     return None
 
 
+def parse_shard(text):
+    """``'K/N'`` -> ``(K, N)``: this recorder is shard K of N (0 <= K < N)."""
+    try:
+        index, count = (int(part) for part in text.split("/"))
+    except ValueError as exc:
+        raise ValueError(f"shard must look like K/N, e.g. 2/8: {text!r}") from exc
+    if count < 1 or not 0 <= index < count:
+        raise ValueError(f"shard K/N needs 0 <= K < N: {text!r}")
+    return index, count
+
+
+def shard_seeds(start, tries, shard):
+    """The seeds shard ``(K, N)`` tries: start+K, start+K+N, ... - shards never share a scene."""
+    index, count = shard
+    return [start + index + count * i for i in range(tries)]
+
+
 def record_episode(env, executor, seed, noise_sigma=0.0, spread=1.0):
     """Run one seeded episode; return (frames, success dict, demo-gate defects).
 
@@ -98,7 +123,7 @@ def record_episode(env, executor, seed, noise_sigma=0.0, spread=1.0):
             return
         stage_index = int(stage_label.split(":", 1)[0])
         frame = {
-            "observation.state": env.joint_state().astype(np.float32),
+            "observation.state": policy_state(env),
             "observation.environment_state": subtask_onehot(stage_index),
             "action": np.asarray(action, dtype=np.float32),
             "task": DEFAULT_INSTRUCTION,
@@ -119,7 +144,10 @@ def build_parser():
     parser.add_argument("--episodes", type=int, default=150, help="number of successful episodes to keep")
     parser.add_argument("--start-seed", type=int, default=FIRST_TRAIN_SEED)
     parser.add_argument("--max-tries", type=int, default=200)
-    parser.add_argument("--root", type=Path, default=DATA_ROOT)
+    parser.add_argument("--shard", type=parse_shard, default=(0, 1), metavar="K/N",
+                        help="record only shard K of N (seeds start+K, start+K+N, ...), for parallel recorders")
+    # Required: with --overwrite a forgotten --root used to delete the old dataset at its default path.
+    parser.add_argument("--root", type=Path, required=True, help="new dataset directory")
     parser.add_argument("--overwrite", action="store_true", help="delete an existing dataset at --root")
     parser.add_argument("--noise", type=float, default=RECORD_NOISE,
                         help="sigma (rad) of the slowly wandering noise added to the executed arm command on "
@@ -143,7 +171,7 @@ def main():
     env = DinnerTableEnv(obs_cameras=())
     executor = Executor(env)
     kept, tried, started = 0, 0, time.perf_counter()
-    for seed in range(args.start_seed, args.start_seed + args.max_tries):
+    for seed in shard_seeds(args.start_seed, args.max_tries, args.shard):
         if kept >= args.episodes:
             break
         tried += 1

@@ -13,7 +13,8 @@ Modes:
   * ``hybrid`` - if the policy times out, the scripted skill finishes that
     stage and the stage is counted as "assisted" (reported separately).
 
-Run:  .venv\\Scripts\\python.exe -m policy.rollout --policy models/policy/act_int8.xml --seeds 0 1 2
+Run:  .venv\\Scripts\\python.exe -m policy.rollout --policy models/policy_v2/act_fp32.xml ^
+        --checkpoint outputs/act_contact_v2/checkpoints/060000/pretrained_model --seeds 0 1 2
 """
 import argparse
 import json
@@ -21,8 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from data.record import CAMERAS, IMAGE_SIZE, RECORD_EVERY, SUBTASK_VOCAB, stage_signature, subtask_onehot
-from policy.export_openvino import DEFAULT_CKPT
+from data.record import CAMERAS, IMAGE_SIZE, RECORD_EVERY, SUBTASK_VOCAB, policy_state, stage_signature, subtask_onehot
 from policy.video_views import compose_views
 from policy.ov_policy import OVActPolicy
 from sim.env import ARMS, TABLE_TOP_Z, UPRIGHT_TOL_DEG, DinnerTableEnv
@@ -104,7 +104,7 @@ def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head
         if k >= steps and done_at is None:
             break
         images = {f"observation.images.{cam}": env.render(cam, IMAGE_SIZE) for cam in CAMERAS}
-        state = env.joint_state()
+        state = policy_state(env)
         action = policy.select_action(state, onehot, images)
         command = np.asarray(action, dtype=float)
         still = still + 1 if previous is not None and np.max(np.abs(command - previous)) < SETTLE_STILL_RAD else 0
@@ -218,10 +218,11 @@ def summarise(per_seed, policy):
     }
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description="Evaluate the OpenVINO ACT policy on seeded scenes.")
-    parser.add_argument("--policy", type=Path, default=ROOT / "models" / "policy" / "act_int8.xml")
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CKPT)
+    # Both required: the old defaults were the v1 INT8 export and the v1 checkpoint.
+    parser.add_argument("--policy", type=Path, required=True, help="OpenVINO IR, e.g. models/policy_v2/act_fp32.xml")
+    parser.add_argument("--checkpoint", type=Path, required=True, help="its LeRobot pretrained_model directory")
     parser.add_argument("--device", default="CPU")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)))
     parser.add_argument("--mode", choices=("policy", "hybrid"), default="hybrid")
@@ -242,7 +243,11 @@ def main():
                         help="comma-separated cameras for --video; several are tiled into one labelled frame "
                              "(e.g. front_high,overhead,left_wrist_cam,right_wrist_cam)")
     parser.add_argument("--out", type=Path, default=ROOT / "out" / "rollout_report.json")
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
 
     plan = json.loads(args.plan.read_text(encoding="utf-8")) if args.plan else DEFAULT_PLAN
     policy = OVActPolicy(args.policy, args.checkpoint, device=args.device, ensemble_m=args.ensemble)

@@ -9,7 +9,8 @@ The accuracy check runs held-out dataset frames through PyTorch and each IR and
 reports the action error in radians after un-normalisation, so optimisation
 does not silently degrade the policy.
 
-Run:  .venv\\Scripts\\python.exe -m policy.export_openvino
+Run:  .venv\\Scripts\\python.exe -m policy.export_openvino --checkpoint outputs\\act_contact_v3\\checkpoints\\060000\\pretrained_model ^
+        --dataset-root data\\dinner_table_contact_v3\\merged --out-dir models\\policy_v3
 """
 import argparse
 import json
@@ -23,13 +24,9 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 
-from data.record import DATA_ROOT, REPO_ID
+from data.record import REPO_ID
 from policy.ov_policy import batch_to_inputs, load_processors
-from policy.train import latest_pretrained
 
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CKPT = latest_pretrained()
-POLICY_DIR = ROOT / "models" / "policy"
 CALIBRATION_FRAMES = 300
 CHECK_FRAMES = 100
 
@@ -60,16 +57,22 @@ def action_error(post, reference, candidate):
     return float(diff.mean()), float(diff.max())
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description="Export ACT to OpenVINO FP32/FP16/INT8.")
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CKPT)
-    parser.add_argument("--dataset-root", type=Path, default=DATA_ROOT)
-    parser.add_argument("--out-dir", type=Path, default=POLICY_DIR)
+    # All required: the old defaults were the v1 checkpoint, the old dataset (INT8 calibration) and
+    # the v1 export directory, which an export without arguments silently overwrote.
+    parser.add_argument("--checkpoint", type=Path, required=True, help="LeRobot pretrained_model directory")
+    parser.add_argument("--dataset-root", type=Path, required=True, help="the dataset it was trained on (calibration)")
+    parser.add_argument("--out-dir", type=Path, required=True, help="new export directory, e.g. models/policy_v3")
     parser.add_argument("--accuracy-control", action="store_true",
                         help="use NNCF accuracy-aware INT8 (reverts sensitive layers to float)")
     parser.add_argument("--max-drop", type=float, default=0.02,
                         help="allowed increase in mean normalised action error for --accuracy-control")
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
 
     config, pre, post = load_processors(args.checkpoint)
     policy = ACTPolicy.from_pretrained(str(args.checkpoint))
