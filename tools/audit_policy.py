@@ -34,7 +34,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from data.record import SUBTASK_VOCAB, stage_signature
+from data.record import EVAL_SEEDS, SUBTASK_VOCAB, stage_signature
 from sim.env import ARMS, PROPS, UPRIGHT_TOL_DEG, UTENSILS
 from sim.task import DEFAULT_PLAN
 
@@ -287,7 +287,7 @@ def main():
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--device", default="CPU")
     parser.add_argument("--ensemble", type=float, default=None, metavar="M")
-    parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)))
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(EVAL_SEEDS))
     parser.add_argument("--out", type=Path, default=ROOT / "out" / "audit_policy.json")
     args = parser.parse_args()
 

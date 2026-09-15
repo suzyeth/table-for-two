@@ -48,6 +48,12 @@ def load_processors(pretrained_dir):
     return config, pre, post
 
 
+def state_dim_of(config):
+    """Size of the ``observation.state`` a checkpoint was trained on: 12 joint positions (v1/v2) or,
+    for policies trained on the newer demos, those plus 12 joint velocities."""
+    return int(config.input_features[OBS_STATE].shape[0])
+
+
 def observation_to_item(state, env_state, images):
     """Build one un-batched LeRobot frame from env observations.
 
@@ -124,7 +130,8 @@ class OVActPolicy:
         self.image_keys = meta["image_keys"]
         self.n_action_steps = meta["n_action_steps"]
         self.device = device
-        _, self.pre, self.post = load_processors(pretrained_dir)
+        config, self.pre, self.post = load_processors(pretrained_dir)
+        self.state_dim = state_dim_of(config)  # run_stage_policy passes that many leading state values
         core = ov.Core()
         model = core.read_model(xml_path)
         if meta.get("input_shapes"):  # pin batch-1 shapes at load time (see export_openvino.py)

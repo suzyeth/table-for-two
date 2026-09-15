@@ -34,6 +34,9 @@ IMAGE_SIZE = (128, 128)
 RECORD_EVERY = 2  # 20 Hz control loop -> 10 Hz dataset
 FPS = 10
 FIRST_TRAIN_SEED = 100
+# 30 scenes no demonstration is recorded on (demos from FIRST_TRAIN_SEED, DAgger from 500): with 10
+# scenes the 95% interval on a success rate was ~0.5 wide, with 30 it is ~0.3.
+EVAL_SEEDS = range(1000, 1030)
 # Recording defaults, from a demo-gate sweep on training seeds 100-109: 0.02 rad of free-space
 # command noise with a 1.5x placement spread kept 9/10 (spread 1.5 alone: 9/10; uniform noise of
 # 0.01 rad: 1/10), with noise on 22% of the control steps. The evaluation scenes keep spread 1.0.

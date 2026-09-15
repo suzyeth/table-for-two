@@ -86,6 +86,31 @@ def test_the_policy_is_given_joint_positions_and_velocities(monkeypatch):
     assert seen and seen[0].shape == (24,) and np.all(seen[0][12:] == 1.0)
 
 
+def test_a_policy_trained_on_positions_only_still_gets_just_the_positions(monkeypatch):
+    """v1/v2 checkpoints expect the 12-D state they were trained on; the new state appends velocities."""
+    seen = []
+
+    class PositionsOnlyPolicy(MovingThenStillPolicy):
+        state_dim = 12
+
+        def select_action(self, state, onehot, images):
+            seen.append(np.asarray(state))
+            return super().select_action(state, onehot, images)
+
+    run(monkeypatch, PositionsOnlyPolicy(moving=1), done=lambda calls: calls >= 1, settle=None)
+    assert seen and seen[0].shape == (12,) and np.all(seen[0] == 0.0)  # FakeEnv: positions 0, velocities 1
+
+
+def test_a_checkpoint_wanting_more_state_than_there_is_is_an_error(monkeypatch):
+    """Slicing would silently hand it 24 values; it must say what is wrong instead."""
+
+    class WiderPolicy(MovingThenStillPolicy):
+        state_dim = 30
+
+    with pytest.raises(ValueError, match="30"):
+        run(monkeypatch, WiderPolicy(moving=1), done=lambda calls: calls >= 1, settle=None)
+
+
 def test_arms_that_never_settle_end_the_stage_after_the_settle_limit(monkeypatch):
     policy = MovingThenStillPolicy(moving=10 ** 6)
     assert run(monkeypatch, policy, done=lambda calls: calls >= 3) is True

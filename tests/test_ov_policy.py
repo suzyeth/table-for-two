@@ -1,8 +1,17 @@
-"""Temporal ensembling of ACT action chunks (inference-time only, no retraining)."""
+"""Temporal ensembling of ACT action chunks (inference-time only, no retraining); the state size a checkpoint expects."""
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
-from policy.ov_policy import TemporalEnsemble
+from policy.ov_policy import TemporalEnsemble, state_dim_of
+
+
+@pytest.mark.parametrize("dim", [12, 24])
+def test_the_state_size_comes_from_the_checkpoint_config(dim):
+    """v1/v2 were trained on 12 joint positions; policies trained on the new demos also see 12 velocities."""
+    config = SimpleNamespace(input_features={"observation.state": SimpleNamespace(shape=(dim,))})
+    assert state_dim_of(config) == dim
 
 
 def chunk(base, n=4, dim=2):

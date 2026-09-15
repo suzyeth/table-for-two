@@ -94,7 +94,9 @@ def main():
     for label, report in (("Learned policy", policy), ("Hybrid", hybrid)):
         if report:
             summary = report["summary"]
-            print(f"\n{label}: full task {summary['task_success_rate'] * 100:.0f}% · "
+            ci = summary.get("task_success_ci95")  # reports written before the intervals have none
+            interval = f" (95% {ci[0] * 100:.0f}–{ci[1] * 100:.0f}%)" if ci else ""
+            print(f"\n{label}: full task {summary['task_success_rate'] * 100:.0f}%{interval} · "
                   f"assisted stages per episode {summary['assisted_stages_per_episode']:.1f} · "
                   f"policy call {summary['policy_infer_ms_mean']} ms")
     if stagewise:

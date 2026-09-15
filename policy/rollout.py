@@ -18,11 +18,13 @@ Run:  .venv\\Scripts\\python.exe -m policy.rollout --policy models/policy_v2/act
 """
 import argparse
 import json
+import math
 from pathlib import Path
 
 import numpy as np
 
-from data.record import CAMERAS, IMAGE_SIZE, RECORD_EVERY, SUBTASK_VOCAB, policy_state, stage_signature, subtask_onehot
+from data.record import (CAMERAS, EVAL_SEEDS, IMAGE_SIZE, RECORD_EVERY, SUBTASK_VOCAB, policy_state, stage_signature,
+                         subtask_onehot)
 from policy.video_views import compose_views
 from policy.ov_policy import OVActPolicy
 from sim.env import ARMS, TABLE_TOP_Z, UPRIGHT_TOL_DEG, DinnerTableEnv
@@ -76,6 +78,16 @@ def stage_done(env, stage, elapsed_s):
     return all(checks)
 
 
+def policy_input(env, policy):
+    """The state the checkpoint was trained on: its first ``state_dim`` values (a checkpoint trained on
+    joint positions only, v1/v2, gets the 12 positions; newer ones also get the 12 velocities)."""
+    state = policy_state(env)
+    dim = getattr(policy, "state_dim", None) or len(state)
+    if dim > len(state):
+        raise ValueError(f"the checkpoint expects a {dim}-D state; the simulator gives {len(state)} values")
+    return state[:dim]
+
+
 def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head=None, video_cameras=("operator",),
                      settle=False):
     """Drive one stage with the policy; True if its predicate holds, and still holds after
@@ -104,7 +116,7 @@ def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head
         if k >= steps and done_at is None:
             break
         images = {f"observation.images.{cam}": env.render(cam, IMAGE_SIZE) for cam in CAMERAS}
-        state = policy_state(env)
+        state = policy_input(env, policy)
         action = policy.select_action(state, onehot, images)
         command = np.asarray(action, dtype=float)
         still = still + 1 if previous is not None and np.max(np.abs(command - previous)) < SETTLE_STILL_RAD else 0
@@ -198,15 +210,31 @@ def evaluate_stagewise(policy, seeds, plan, head=None, settle=False):
     return {name: wins[name] / len(seeds) for name in wins}
 
 
+def wilson_interval(successes, n, z=1.96):
+    """95% Wilson score interval (low, high) for ``successes`` out of ``n``: with 10 scenes a single
+    rate says little (the same checkpoint once scored the pour 8/10, then 3/10)."""
+    if n == 0:
+        return 0.0, 1.0
+    p = successes / n
+    denominator = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denominator
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denominator
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
 def summarise(per_seed, policy):
     keys = [k for k in per_seed[0]["success"] if k != "all"]
     scored = [i for i, s in enumerate(per_seed[0]["stages"]) if s["scored"]]
     names = {i: per_seed[0]["stages"][i]["stage"] for i in scored}
     return {
         "task_success_rate": float(np.mean([r["success"]["all"] for r in per_seed])),
+        "task_success_ci95": wilson_interval(sum(bool(r["success"]["all"]) for r in per_seed), len(per_seed)),
         "subgoal_success": {k: float(np.mean([r["success"][k] for r in per_seed])) for k in keys},
         "policy_stage_success": {names[i]: float(np.mean([r["stages"][i]["policy_ok"] for r in per_seed]))
                                  for i in scored},
+        "policy_stage_success_ci95": {
+            names[i]: wilson_interval(sum(bool(r["stages"][i]["policy_ok"]) for r in per_seed), len(per_seed))
+            for i in scored},
         "policy_stage_success_from_clean_state": {
             names[i]: float(np.mean([r["stages"][i]["policy_ok_from_clean_state"] for r in per_seed])) for i in scored},
         "assisted_stages": {names[i]: int(sum(r["stages"][i]["assisted"] for r in per_seed)) for i in scored},
@@ -224,7 +252,7 @@ def build_parser():
     parser.add_argument("--policy", type=Path, required=True, help="OpenVINO IR, e.g. models/policy_v2/act_fp32.xml")
     parser.add_argument("--checkpoint", type=Path, required=True, help="its LeRobot pretrained_model directory")
     parser.add_argument("--device", default="CPU")
-    parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)))
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(EVAL_SEEDS))
     parser.add_argument("--mode", choices=("policy", "hybrid"), default="hybrid")
     parser.add_argument("--switch", choices=("oracle", "head"), default="oracle",
                         help="who ends a stage: the simulator oracle, or the policy's stage-completion head")
@@ -259,6 +287,8 @@ def main():
         per_stage = evaluate_stagewise(policy, args.seeds, plan, head, args.settle)
         report = {"policy": str(args.policy), "mode": "stagewise", "switch": args.switch, "settle": args.settle,
                   "ensemble": args.ensemble, "seeds": args.seeds, "per_stage_success": per_stage,
+                  "per_stage_ci95": {name: wilson_interval(round(rate * len(args.seeds)), len(args.seeds))
+                                     for name, rate in per_stage.items()},
                   "policy_infer_ms_mean": round(float(np.mean(policy.infer_ms)), 3) if policy.infer_ms else None}
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")
