@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sim.env import ARMS, TABLE_TOP_Z, DinnerTableEnv
+from sim.env import ARMS, CONTROL_HZ, TABLE_TOP_Z, DinnerTableEnv
 from sim.bimanual import carry_together, lockstep
 from sim.grasping import horizontal, utensil_axis
 from sim.skills import ArmSkills
@@ -63,6 +63,11 @@ PLATE_GRIP_DEG = 105
 BIMANUAL_OBJECTS = ("plate",)
 MAX_STEPS = 6000
 SETTLE_BEFORE_SCORING_S = 1.0
+# Every stage ends with the arms held still this long, recorded under the finished stage's label, so a
+# policy learns to stop once a stage is done (the v2 policy, trained on demos whose next stage began 3
+# control steps after the last motion, never came to rest and ran on into the next skill). Longer than
+# the evaluator's settle window (policy/rollout.py, 2 s) and any pause inside a stage (the pour's 1.4 s).
+STAGE_END_HOLD_S = 2.5
 
 DEFAULT_INSTRUCTION = (
     "Carry the plate to the placemat with both hands, open the drawer and put the mug at the front "
@@ -238,6 +243,14 @@ class Executor:
                         on_step(action, f"{index}:{label}")
                     self.env.step(action)
                     steps += 1
+            hold = np.concatenate([self.skills[a].cmd for a in ARMS])
+            for _ in range(int(round(STAGE_END_HOLD_S * CONTROL_HZ))):  # the stage is done: arms still
+                if steps >= max_steps:
+                    break
+                if on_step:
+                    on_step(hold, f"{index}:{label}")
+                self.env.step(hold)
+                steps += 1
             if verbose:
                 self._report(f"{index}:{label} done")
         return steps

@@ -3,7 +3,10 @@
 The plan (from the language planner or the default plan) is run stage by
 stage. For each stage the policy receives the camera views, the joint state
 and the stage's one-hot subtask; it outputs joint targets at 10 Hz. A stage
-ends when its success predicate holds, or after a timeout.
+ends when its success predicate holds, or after a timeout. With ``--settle`` it
+ends only once the policy's commands have also come to rest - for policies
+trained on demos that end every stage with a still hold (sim/task.py
+STAGE_END_HOLD_S); earlier policies never stop and run on into the next skill.
 
 Modes:
   * ``policy`` - the learned policy alone; a timed-out stage is a failure;
@@ -30,6 +33,14 @@ STAGE_TIMEOUT_S = 40.0  # the longest contact stage (hand-over) takes ~25 s scri
 HOME_SECONDS = 2.0
 LIFTED_ABOVE_TABLE = 0.06
 CONFIRM_SECONDS = 1.0
+# With ``settle`` a stage ends where the demonstrations end it: after the check passes the policy keeps running the
+# same stage (letting go, going home) until its commands have been still for SETTLE_STILL_STEPS,
+# counted from when the check passed, or for at most SETTLE_LIMIT_STEPS more steps. 2 s is longer
+# than any pause inside a demonstrated stage (the pour holds the tilted bottle still for 1.4 s),
+# so a pause under way cannot end the stage before the bottle is straightened.
+SETTLE_STILL_RAD = 0.01  # a command changing less than this per 10 Hz step counts as still
+SETTLE_STILL_STEPS = 20
+SETTLE_LIMIT_STEPS = 100  # 10 s
 
 
 def is_scored(stage):
@@ -65,10 +76,18 @@ def stage_done(env, stage, elapsed_s):
     return all(checks)
 
 
-def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head=None, video_cameras=("operator",)):
+def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head=None, video_cameras=("operator",),
+                     settle=False):
     """Drive one stage with the policy; True if its predicate holds, and still holds after
     the arms have been held still for CONFIRM_SECONDS (so a bead splash or a plate that is
     about to tip over does not count).
+
+    With ``settle``, once the predicate holds the policy keeps running this stage until its
+    commands have been still for SETTLE_STILL_STEPS (or for at most SETTLE_LIMIT_STEPS), so
+    the next stage starts where a demonstrated one does - after the hand has let go and gone
+    home. A predicate that no longer holds once settled sends the stage back to running. Only
+    for policies trained on demos that end each stage with a still hold: the v2 policy never
+    comes to rest and runs on into the next skill (pour 6/10 -> 3/10 with settling).
 
     With ``head`` (a stage-completion head, policy/stage_head.py) the *policy side* decides
     when the stage is over: the loop ends when the head has said "done" for its streak, and
@@ -80,10 +99,16 @@ def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head
     if head is not None:
         head.reset()
     steps = int(STAGE_TIMEOUT_S * 20 / RECORD_EVERY)
-    for k in range(steps):
+    done_at, still, previous = None, 0, None
+    for k in range(steps + SETTLE_LIMIT_STEPS):  # the extra steps only let a late success settle
+        if k >= steps and done_at is None:
+            break
         images = {f"observation.images.{cam}": env.render(cam, IMAGE_SIZE) for cam in CAMERAS}
         state = env.joint_state()
         action = policy.select_action(state, onehot, images)
+        command = np.asarray(action, dtype=float)
+        still = still + 1 if previous is not None and np.max(np.abs(command - previous)) < SETTLE_STILL_RAD else 0
+        previous = command.copy()
         for _ in range(RECORD_EVERY):  # dataset is 10 Hz, control loop is 20 Hz
             env.step(action)
         if frames is not None:
@@ -95,10 +120,13 @@ def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head
                 env.hold(CONFIRM_SECONDS)
                 return stage_done(env, stage, elapsed + CONFIRM_SECONDS)
             continue
-        if stage_done(env, stage, elapsed):
+        if done_at is None and k < steps and stage_done(env, stage, elapsed):
+            done_at, still = k, 0
+        if done_at is not None and (not settle or still >= SETTLE_STILL_STEPS or k - done_at >= SETTLE_LIMIT_STEPS):
             env.hold(CONFIRM_SECONDS)
             if stage_done(env, stage, elapsed + CONFIRM_SECONDS):
                 return True
+            done_at = None
     return False
 
 
@@ -108,7 +136,7 @@ def run_stage_scripted(env, executor, stage):
     executor.run([stage])
 
 
-def evaluate(policy, seeds, plan, mode, video_frames=None, head=None, video_cameras=("operator",)):
+def evaluate(policy, seeds, plan, mode, video_frames=None, head=None, video_cameras=("operator",), settle=False):
     env = DinnerTableEnv(obs_cameras=())
     executor = Executor(env)
     per_seed = []
@@ -121,7 +149,8 @@ def evaluate(policy, seeds, plan, mode, video_frames=None, head=None, video_came
             signature = stage_signature(stage)
             if signature not in SUBTASK_VOCAB:
                 raise ValueError(f"stage '{signature}' was never demonstrated; the policy cannot run it")
-            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(signature), video_frames, head, video_cameras)
+            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(signature), video_frames, head, video_cameras,
+                                  settle)
             assisted = False
             if not ok and mode == "hybrid":
                 run_stage_scripted(env, executor, stage)
@@ -143,7 +172,7 @@ def evaluate(policy, seeds, plan, mode, video_frames=None, head=None, video_came
     return per_seed
 
 
-def evaluate_stagewise(policy, seeds, plan, head=None):
+def evaluate_stagewise(policy, seeds, plan, head=None, settle=False):
     """Per-skill success: script every earlier stage, then let the policy do just this one.
 
     Chained rollouts hide which skills the policy has learned, because one failed
@@ -162,7 +191,7 @@ def evaluate_stagewise(policy, seeds, plan, head=None):
             executor.run(plan[:index])
             for arm in ARMS:
                 executor.skills[arm].cmd = env.data.ctrl[env.act_idx[arm]].copy()
-            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(names[index]), head=head)
+            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(names[index]), head=head, settle=settle)
             wins[names[index]] += ok
         print(f"seed {seed}: cumulative per-stage wins {wins}")
     env.close()
@@ -199,6 +228,9 @@ def main():
     parser.add_argument("--switch", choices=("oracle", "head"), default="oracle",
                         help="who ends a stage: the simulator oracle, or the policy's stage-completion head")
     parser.add_argument("--head", type=Path, default=ROOT / "models" / "stage_head" / "stage_head_int8.xml")
+    parser.add_argument("--settle", action="store_true",
+                        help="after a stage's check passes, run on until the policy's commands come to rest (only "
+                             "for policies trained on demos with a still hold at the end of every stage)")
     parser.add_argument("--ensemble", type=float, default=None, metavar="M",
                         help="temporal ensembling: infer every step and blend overlapping chunks with "
                              "weights exp(-M*i) (ACT paper uses 0.01); default = LeRobot action queue")
@@ -219,8 +251,9 @@ def main():
         from policy.stage_head import OVStageHead
         head = OVStageHead(args.head, device=args.device)
     if args.stagewise:
-        per_stage = evaluate_stagewise(policy, args.seeds, plan, head)
-        report = {"policy": str(args.policy), "mode": "stagewise", "switch": args.switch, "ensemble": args.ensemble, "seeds": args.seeds, "per_stage_success": per_stage,
+        per_stage = evaluate_stagewise(policy, args.seeds, plan, head, args.settle)
+        report = {"policy": str(args.policy), "mode": "stagewise", "switch": args.switch, "settle": args.settle,
+                  "ensemble": args.ensemble, "seeds": args.seeds, "per_stage_success": per_stage,
                   "policy_infer_ms_mean": round(float(np.mean(policy.infer_ms)), 3) if policy.infer_ms else None}
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")
@@ -228,8 +261,9 @@ def main():
         return
     frames = [] if args.video else None
     per_seed = evaluate(policy, args.seeds, plan, args.mode, frames, head,
-                        tuple(c.strip() for c in args.video_cameras.split(",") if c.strip()))
-    report = {"policy": str(args.policy), "mode": args.mode, "switch": args.switch, "ensemble": args.ensemble, "seeds": args.seeds,
+                        tuple(c.strip() for c in args.video_cameras.split(",") if c.strip()), args.settle)
+    report = {"policy": str(args.policy), "mode": args.mode, "switch": args.switch, "settle": args.settle,
+              "ensemble": args.ensemble, "seeds": args.seeds,
               "summary": summarise(per_seed, policy), "episodes": per_seed}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")
