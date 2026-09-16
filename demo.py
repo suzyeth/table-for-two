@@ -3,7 +3,10 @@
 Examples:
   .venv\\Scripts\\python.exe demo.py --seed 3
   .venv\\Scripts\\python.exe demo.py --text "Carry the plate with both hands, pour a drink and pass the spoon to the right arm"
-  .venv\\Scripts\\python.exe demo.py --audio recordings\\set_table.wav --executor policy
+  .venv\\Scripts\\python.exe demo.py --audio recordings\\set_table.wav --executor policy ^
+      --policy models\\policy_v3_100k\\act_int8.xml --checkpoint outputs\\act_contact_v3\\checkpoints\\100000\\pretrained_model
+(with --executor policy a stage the policy times out on is finished by the scripted skill and marked as such;
+ --scripted-stages pour return handoff gives those stages to the scripted skill from the start)
 
 Writes an MP4 (operator view with an overhead inset, the instruction, the
 current subtask and the final sub-goal checklist) plus a JSON log next to it.
@@ -82,18 +85,67 @@ def stage_text(stage):
     return "  |  ".join(parts)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Instruction -> plan -> bimanual execution demo video.")
+def policy_can_run(stage):
+    """True if the policy was trained on this stage (it has a subtask token for it)."""
+    from data.record import SUBTASK_VOCAB, stage_signature
+
+    return stage_signature(stage) in SUBTASK_VOCAB
+
+
+def pack_for_policy(plan):
+    """A copy of ``plan`` with neighbouring stages merged where the policy only knows them as one
+    parallel stage (e.g. the left hand laying the fork while the right lifts the bottle)."""
+    packed = []
+    for stage in plan:
+        if packed and not policy_can_run(packed[-1]) and not policy_can_run(stage) \
+                and policy_can_run(packed[-1] + list(stage)):
+            packed[-1] = packed[-1] + list(stage)
+        else:
+            packed.append(list(stage))
+    return packed
+
+
+def run_by_script(stage, scripted_stages):
+    """True if the demo was asked to let the scripted skill do ``stage`` (any of its skills listed)."""
+    return any(sub["skill"] in scripted_stages for sub in stage)
+
+
+def takeover_note(demonstrated):
+    """Caption suffix for a stage the scripted skill runs in a policy demo."""
+    return "scripted takeover" if demonstrated else "scripted: not a demonstrated stage"
+
+
+class DemoParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        parsed = super().parse_args(args, namespace)
+        if parsed.executor == "policy" and (parsed.policy is None or parsed.checkpoint is None):
+            self.error("--executor policy needs --policy (an OpenVINO IR) and --checkpoint (its pretrained_model)")
+        return parsed
+
+
+def build_parser():
+    parser = DemoParser(description="Instruction -> plan -> bimanual execution demo video.")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--text", help="typed instruction")
     source.add_argument("--audio", type=Path, help="spoken instruction (transcribed with Speechmatics)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--planner-device", default="CPU")
     parser.add_argument("--executor", choices=("scripted", "policy"), default="scripted")
-    parser.add_argument("--policy", type=Path, default=ROOT / "models" / "policy" / "act_int8.xml")
+    # No defaults: the old ones were the v1 model.
+    parser.add_argument("--policy", type=Path, help="OpenVINO IR of the policy, e.g. models/policy_v3_100k/act_int8.xml")
+    parser.add_argument("--checkpoint", type=Path, help="its LeRobot pretrained_model directory")
+    parser.add_argument("--ensemble", type=float, default=0.01, metavar="M",
+                        help="temporal ensembling weight (as policy/rollout.py; the best-scoring setting)")
+    parser.add_argument("--scripted-stages", nargs="+", default=[], metavar="SKILL",
+                        help="with --executor policy, stages with these skills are done by the scripted skill from "
+                             "the start and captioned so (e.g. the ones the policy fails in evaluation)")
     parser.add_argument("--policy-device", default="CPU")
     parser.add_argument("--out", type=Path, default=ROOT / "out" / "demo.mp4")
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
 
     transcription_s = None
     if args.audio:
@@ -130,24 +182,36 @@ def main():
             stage_log.append({"stage": label, "policy_ok": None, "assisted": False})
     else:
         from data.record import SUBTASK_VOCAB, stage_signature
-        from policy.export_openvino import DEFAULT_CKPT
         from policy.ov_policy import OVActPolicy
-        from policy.rollout import run_stage_policy, run_stage_scripted
+        from policy.rollout import run_stage_policy
+        from sim.env import ARMS
 
-        policy = OVActPolicy(args.policy, DEFAULT_CKPT, device=args.policy_device)
+        policy = OVActPolicy(args.policy, args.checkpoint, device=args.policy_device, ensemble_m=args.ensemble)
         executor = Executor(env)
         executor.reset()
-        for stage in plan:
+        for stage in pack_for_policy(plan):
             label = stage_text(stage)
-            raw = []
-            ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(stage_signature(stage)), raw)
-            frames.extend(compose_frame(env, instruction, f"{label}  (learned policy)", footer, main_frame=frame)
-                          for frame in raw)
-            assisted = False
-            if not ok:
-                run_stage_scripted(env, executor, stage)
-                assisted = True
-            stage_log.append({"stage": label, "policy_ok": ok, "assisted": assisted})
+            demonstrated = policy_can_run(stage)
+            chosen_scripted = run_by_script(stage, args.scripted_stages)
+            ok = False
+            if demonstrated and not chosen_scripted:
+                raw = []
+                ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(stage_signature(stage)), raw)
+                frames.extend(compose_frame(env, instruction, f"{label}  (learned policy)", footer, main_frame=frame)
+                              for frame in raw)
+            if not ok:  # the scripted skill finishes (or, if never demonstrated, does) the stage, on camera
+                for arm in ARMS:
+                    executor.skills[arm].cmd = env.data.ctrl[env.act_idx[arm]].copy()
+                note = "scripted skill" if chosen_scripted else takeover_note(demonstrated)
+                caption = f"{label}  ({note})"
+
+                def record(_action, _stage, caption=caption):
+                    if env.time_step % FRAME_EVERY == 0:
+                        frames.append(compose_frame(env, instruction, caption, footer))
+
+                executor.run([stage], on_step=record)
+            stage_log.append({"stage": label, "demonstrated": demonstrated, "scripted_by_choice": chosen_scripted,
+                              "policy_ok": ok, "assisted": not ok and not chosen_scripted})
 
     result = env.success()
     checklist = {k.replace("_", " "): v for k, v in result.items() if k != "all"}
