@@ -25,6 +25,9 @@ MEDIA = ROOT / "docs" / "media"
 TILE = (192, 256)  # (height, width) of one grid tile
 GRID = (2, 5)
 FRAME_EVERY = 4  # control steps per grid frame (20 Hz -> 5 fps)
+# The scene renders without multisampling so a seed replays exactly; these pictures are for people and
+# never feed a policy, so they get MuJoCo's usual 4x anti-aliasing back.
+MEDIA_OFFSAMPLES = 4
 
 
 def font(size):
@@ -117,11 +120,18 @@ def render_grid(env, executor, seeds):
     print(f"wrote grid_10seeds.mp4 ({length} frames) and grid_10_seeds.png; {sum(results)}/{len(seeds)} succeeded")
 
 
+def media_env():
+    """The simulation with anti-aliased rendering, for stills and videos of the scripted pipeline only."""
+    env = DinnerTableEnv(obs_cameras=())
+    env.model.vis.quality.offsamples = MEDIA_OFFSAMPLES  # before the first render creates a context
+    return env
+
+
 def main():
     parser = argparse.ArgumentParser(description="Render README/deck/video stills and the 10-seed grid.")
     parser.add_argument("what", nargs="?", default="all", choices=("cover", "cover_alt", "grid", "all"))
     args = parser.parse_args()
-    env = DinnerTableEnv(obs_cameras=())
+    env = media_env()
     executor = Executor(env)
     OUT.mkdir(exist_ok=True)
     MEDIA.mkdir(parents=True, exist_ok=True)
