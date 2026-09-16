@@ -383,9 +383,25 @@ class PourMixin:
                         lowered[i] = changed = True
         return [pose(i) for i in range(len(plan))]
 
+    def holds(self, obj):
+        """True if this hand's fingers touch ``obj``."""
+        return bool(self.env._contact_bodies(obj) & self.env.finger_bodies[self.arm])
+
+    def _side_grasp_in_hand(self):
+        """The side grasp of a bottle picked up by something else (the learned policy), read off the hand:
+        the sign of its jaw-width axis and the usual pinch point."""
+        if not self.holds("bottle"):
+            return None
+        sign = 1.0 if self.frame()[1][2, 1] >= 0 else -1.0
+        pinch = np.array([FIXED_PAD_X + PAD_CLEARANCE + BOTTLE["radius"], 0.0, SITE_LOCAL[2] + SIDE_OVERLAPS[0]])
+        return {"orient": {"approach": None, "lateral": sign * UP, "point": pinch}, "sign": sign}
+
     def return_bottle(self, xy):
         """Stand the bottle back at ``xy``, open, and slide the hand up off it."""
         if self.side is None:
+            self.side = self._side_grasp_in_hand()
+        if self.side is None:
+            self.warnings.append(f"{self.arm} holds no bottle to return")
             return
         point = self.held_point("bottle")
         lateral = self.side["sign"] * UP
