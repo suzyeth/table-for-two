@@ -23,3 +23,15 @@ def test_the_simulation_itself_still_renders_without_multisampling():
     finally:
         env.close()
         plain.close()
+
+
+def test_grid_captions_are_plain_text():
+    """The tick and cross glyphs were not in the fonts used, so every finished tile said "seed 0 □ all 7"."""
+    from tools.render_media import caption
+
+    assert caption(3, done=False, success=False) == ("seed 3", caption(3, False, False)[1])
+    text, colour = caption(3, done=True, success=True)
+    assert text == "seed 3 · all 7 done" and colour[1] > colour[0]
+    assert caption(3, done=True, success=False)[0] == "seed 3 · not all done"
+    for done, success in ((True, True), (True, False), (False, False)):
+        assert all(ord(ch) < 0x2190 for ch in caption(3, done, success)[0])

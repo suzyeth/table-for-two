@@ -81,6 +81,23 @@ def render_cover_alt(env, executor):
     print("wrote cover_alt.png (the pour)")
 
 
+def caption(seed, done, success):
+    """(text, colour) for a grid tile. Plain text: tick and cross glyphs are missing from common fonts."""
+    if not done:
+        return f"seed {seed}", (230, 233, 231)
+    if success:
+        return f"seed {seed} · all 7 done", (120, 220, 140)
+    return f"seed {seed} · not all done", (240, 150, 120)
+
+
+def draw_caption(tile, seed, done, success, label):
+    """Draw the caption bar onto a PIL tile in place."""
+    text, colour = caption(seed, done, success)
+    draw = ImageDraw.Draw(tile)
+    draw.rectangle([0, 0, TILE[1], 22], fill=(18, 22, 20))
+    draw.text((6, 3), text, font=label, fill=colour)
+
+
 def render_grid(env, executor, seeds):
     clips, results = [], []
     for seed in seeds:
@@ -107,11 +124,7 @@ def render_grid(env, executor, seeds):
         for i, (seed, clip) in enumerate(zip(seeds, clips)):
             frame = clip[min(t, len(clip) - 1)]
             tile = Image.fromarray(frame)
-            draw = ImageDraw.Draw(tile)
-            done = t >= len(clip) - 1
-            text = f"seed {seed}" + ("  ✓ all 7" if done and results[i] else ("  ✗" if done else ""))
-            draw.rectangle([0, 0, TILE[1], 22], fill=(18, 22, 20))
-            draw.text((6, 3), text, font=label, fill=(120, 220, 140) if done and results[i] else (230, 233, 231))
+            draw_caption(tile, seed, t >= len(clip) - 1, results[i], label)
             sheet.paste(tile, ((i % cols) * TILE[1], (i // cols) * TILE[0]))
         last = sheet
         writer.append_data(np.asarray(sheet))
