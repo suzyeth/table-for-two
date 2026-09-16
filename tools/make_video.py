@@ -171,6 +171,27 @@ def closing_card(data):
     return image
 
 
+def demo_caption(demo_log):
+    """Caption for the demo footage: who executed it (each stage's executor is also shown in the footage)."""
+    seed = demo_log["seed"]
+    if demo_log["executor"] != "policy":
+        return f"3 · Execution by the scripted skills — seed {seed}"
+    if all(stage["policy_ok"] for stage in demo_log["stages"]):
+        return f"3 · Execution by the learned policy — seed {seed}"
+    return f"3 · Execution by the learned policy + scripted skills (labelled above) — seed {seed}"
+
+
+def speed_up(frames, factor):
+    """Every ``factor``-th frame: the footage plays ``factor`` times faster at the same frame rate."""
+    for index, frame in enumerate(frames):
+        if index % factor == 0:
+            yield frame
+
+
+def speed_label(text, factor):
+    return text if factor == 1 else f"{text} ({factor}× speed)"
+
+
 def card_seconds(name, durations):
     spoken = durations.get(name, 0.0)
     return max(CARD_SECONDS[name], spoken + NARRATION_TAIL_S if spoken else 0.0)
@@ -216,6 +237,7 @@ def main():
     parser = argparse.ArgumentParser(description="Build the captioned submission video.")
     parser.add_argument("--demo", type=Path, default=OUT / "demo_policy_seed8.mp4")
     parser.add_argument("--grid", type=Path, default=OUT / "grid_10seeds.mp4")
+    parser.add_argument("--speed", type=int, default=1, help="play the demo and grid footage this many times faster")
     parser.add_argument("--voice-dir", type=Path, help="WAVs from tools/voiceover.py; adds narration")
     parser.add_argument("--out", type=Path, default=OUT / "submission_video.mp4")
     args = parser.parse_args()
@@ -235,13 +257,14 @@ def main():
     frames += hold(title_card(data), card_seconds("title", durations))
     begin("plan")
     frames += hold(plan_card(demo_log), card_seconds("plan", durations))
-    executor = "learned policy" if demo_log["executor"] == "policy" else "scripted skills"
+    demo_text = speed_label(demo_caption(demo_log), args.speed)
     begin("demo")
-    for frame in imageio.get_reader(args.demo):
-        frames.append(np.asarray(caption(letterbox(frame), f"3 · Execution by the {executor} — seed {demo_log['seed']}")))
+    for frame in speed_up(imageio.get_reader(args.demo), args.speed):
+        frames.append(np.asarray(caption(letterbox(frame), demo_text)))
     begin("grid")
-    for frame in imageio.get_reader(args.grid):
-        frames.append(np.asarray(caption(letterbox(frame), "4 · Robustness: 10 randomised seeds (positions, mass, friction, light)")))
+    grid_text = speed_label("4 · Robustness: 10 randomised seeds (positions, mass, friction, light)", args.speed)
+    for frame in speed_up(imageio.get_reader(args.grid), args.speed):
+        frames.append(np.asarray(caption(letterbox(frame), grid_text)))
     begin("results")
     frames += hold(results_card(data), card_seconds("results", durations))
     begin("latency")
