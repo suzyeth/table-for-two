@@ -145,6 +145,9 @@ ACT trained on 266 scripted episodes (14 held out) in the current scene, with
 the pour and the first frames of every stage oversampled (see Honest notes).
 Held-out validation loss kept falling to the end: 0.0222 at 80k, 0.0211 at
 100k, **0.0190 at 120k** (`tools/val_loss.py`, `out/act_contact_v3_val_loss_120k.json`).
+A further 20k steps did not help: from a scripted start the 140k checkpoint
+pours 2/10 (18.2 beads in, 5.8 spilled) and hands the spoon over 0/10
+(`out/v3_140k_rollout_stagewise_*`), so 120k is the released policy.
 Stage success on the ten evaluation seeds with temporal ensembling and the
 oracle stage switch (`policy/rollout.py`; `home` stages are not scored). A
 stage counts only if the policy finishes it within its time limit: 60 s for
@@ -177,6 +180,14 @@ loss was still falling, so the policy is under-trained rather than stuck; we
 ran out of time to train further. The chain breaks where one stage leaves a
 state (the bottle's place in the fingers, where it was set down) that the next
 stage never saw in the demonstrations.
+
+The ensembling weight matters for the hand-over. With `--ensemble 0.1`
+(older chunk predictions weigh more) the hand-over from a scripted start rises
+from 5/10 to 8/10 on seeds 0–9; since those are the evaluation seeds, we checked
+it on 30 unseen seeds (1000–1029): 21/30 against 16/30 with 0.01
+(`out/v3_120k_handoff_unseen_ens*.json`). The pour stays at 3/10 with slightly
+more spilled (4.6 beads), and the chained run does not improve (stages solved
+10/10/8/0/6/1, the plate ends in place only 7/10), so every table above uses 0.01.
 
 Hybrid mode (a scripted skill finishes any stage the policy timed out on,
 counted as assisted, never as a success): no full table
@@ -364,7 +375,8 @@ Spoken input: copy `.env.example` to `.env`, add a Speechmatics key, then
 ### 4. Learned policy — optional; needs an NVIDIA GPU (or the released checkpoint)
 
 Download the trained checkpoint and OpenVINO IRs from the GitHub release
-(link to be added) and unpack them to
+([policy-v3-120k](https://github.com/suzyeth/table-for-two/releases/tag/policy-v3-120k);
+unzip both archives in the repository root) so they land in
 `outputs/act_contact_v3/checkpoints/120000/pretrained_model/` and
 `models/policy_v3_120k/`, or retrain:
 
