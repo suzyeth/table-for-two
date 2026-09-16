@@ -101,7 +101,8 @@ single-object labs and the per-stage tracer used to find each of these.
 **Scripted contact pipeline.** Seeds 0–9 are the evaluation seeds the brief
 asks for (seed 0 is the nominal layout, 1–9 randomised) and also the seeds the
 skills were debugged on, so they are reported next to a block of 30 seeds
-(1000–1029) that were never looked at:
+(1000–1029) that were never looked at. Measured in the current scene (props
+slide on the table at μ 0.4; `out/scripted_friction04_seeds0-9_1000-1029.txt`):
 
 | Sub-goal | Seeds 0–9 | Unseen seeds 1000–1029 |
 |---|---|---|
@@ -110,9 +111,12 @@ skills were debugged on, so they are reported next to a block of 30 seeds
 | Plate on placemat (two-handed) | 10/10 | 30/30 |
 | Fork placed | 10/10 | 30/30 |
 | Spoon handed over and placed | 10/10 | 30/30 |
-| Poured (≥ 60 % of the beads in the mug, ≤ 2 spilled) | 10/10 | 30/30 |
+| Poured (≥ 60 % of the beads in the mug, ≤ 2 spilled) | 10/10 | 29/30 |
 | Bottle put back | 10/10 | 30/30 |
-| **Full task** | **10/10** | **30/30** |
+| **Full task** | **10/10** | **29/30** |
+
+(At the earlier μ 1.0 both columns were full; at 0.4 seed 1009's pour misses the
+bead threshold.)
 
 `tools/audit_contact.py` checks every hold on seeds 0–9 (`out/audit_contact_final.txt`):
 no object is lost while the fingers squeeze; every set-down touches the table
