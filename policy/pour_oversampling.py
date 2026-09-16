@@ -20,6 +20,13 @@ from data.record import SUBTASK_VOCAB, stage_signature
 
 POUR_STAGE = SUBTASK_VOCAB.index(stage_signature([{"skill": "pour", "arm": "right", "into": "mug"}]))
 POUR_OVERSAMPLE = 2
+# Every demo stage ends with a still hold (sim/task.py STAGE_END_HOLD_S: ~26 frames that say "stay
+# put"), while a static arm starting to move shows up only in the first frames of the next stage. v3
+# learned the hold and froze at the start of the pour (1/10 even from a scripted start, the arm all but
+# still for the whole stage). Showing the first START_FRAMES of every stage START_OVERSAMPLE times
+# rebalances the two.
+START_FRAMES = 10
+START_OVERSAMPLE = 5
 
 
 class OversamplingSampler(EpisodeAwareSampler):
@@ -60,9 +67,31 @@ def pour_frame_indices(dataset_root, stage=POUR_STAGE):
     return np.concatenate(found) if found else np.zeros(0, dtype=np.int64)
 
 
-def install(lerobot_train, dataset_root, factor=POUR_OVERSAMPLE):
-    """Make LeRobot's training script build an ``OversamplingSampler`` that shows each pour frame ``factor`` times."""
-    if factor <= 1:
+def stage_start_indices(dataset_root, frames=START_FRAMES):
+    """Absolute indices of the first ``frames`` frames of every stage of every episode."""
+    found = []
+    for path in sorted(Path(dataset_root).glob("data/**/*.parquet")):
+        table = pq.read_table(path, columns=["index", "episode_index", "observation.environment_state"])
+        index = np.asarray(table.column("index").to_pylist(), dtype=np.int64)
+        episode = np.asarray(table.column("episode_index").to_pylist(), dtype=np.int64)
+        stage = np.asarray(table.column("observation.environment_state").to_pylist(), dtype=float).argmax(axis=1)
+        starts_run = np.ones(len(index), dtype=bool)
+        starts_run[1:] = (stage[1:] != stage[:-1]) | (episode[1:] != episode[:-1])
+        run_start = np.flatnonzero(starts_run)
+        offset = np.arange(len(index)) - run_start[np.cumsum(starts_run) - 1]
+        found.append(index[offset < frames])
+    return np.concatenate(found) if found else np.zeros(0, dtype=np.int64)
+
+
+def install(lerobot_train, dataset_root, factor=POUR_OVERSAMPLE, start_factor=1, start_frames=START_FRAMES):
+    """Make LeRobot's training script build an ``OversamplingSampler`` that shows each pour frame ``factor``
+    times and the first ``start_frames`` frames of every stage ``start_factor`` times."""
+    parts = []
+    if factor > 1:
+        parts.append(np.repeat(pour_frame_indices(dataset_root), int(factor) - 1))
+    if start_factor > 1:
+        parts.append(np.repeat(stage_start_indices(dataset_root, start_frames), int(start_factor) - 1))
+    if not parts:
         return
-    extras = np.repeat(pour_frame_indices(dataset_root), int(factor) - 1)
+    extras = np.concatenate(parts)
     lerobot_train.EpisodeAwareSampler = functools.partial(OversamplingSampler, extra_indices=extras)

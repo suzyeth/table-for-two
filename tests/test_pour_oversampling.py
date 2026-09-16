@@ -65,3 +65,41 @@ def test_a_factor_of_one_leaves_lerobot_alone(tmp_path):
     module = SimpleNamespace(EpisodeAwareSampler="original")
     install(module, tmp_path, factor=1)
     assert module.EpisodeAwareSampler == "original"
+
+
+def write_episodes(root, episodes):
+    """``episodes``: one list of stage indices per episode, frames numbered consecutively."""
+    folder = root / "data" / "chunk-000"
+    folder.mkdir(parents=True)
+    stages = [s for episode in episodes for s in episode]
+    episode_index = [e for e, episode in enumerate(episodes) for _ in episode]
+    one_hots = [[1.0 if i == stage else 0.0 for i in range(7)] for stage in stages]
+    pq.write_table(pa.table({"index": list(range(len(stages))), "episode_index": episode_index,
+                             "observation.environment_state": one_hots}), folder / "file-000.parquet")
+
+
+def test_the_first_frames_of_every_stage_are_found_per_episode(tmp_path):
+    """v3 froze at the start of the pour: every demo stage ends with a 2.5 s still hold (26 still
+    frames), while a static arm starting to move shows up in only the first frames of the next
+    stage. Those first frames are what the policy has to learn from."""
+    write_episodes(tmp_path, [[0, 0, 0, 1, 1, 1, 1], [0, 0, 2, 2, 2]])
+    from policy.pour_oversampling import stage_start_indices
+
+    assert stage_start_indices(tmp_path, frames=2).tolist() == [0, 1, 3, 4, 7, 8, 9, 10]
+
+
+def test_a_stage_shorter_than_the_window_gives_only_its_own_frames(tmp_path):
+    write_episodes(tmp_path, [[0, 1, 1, 1]])
+    from policy.pour_oversampling import stage_start_indices
+
+    assert stage_start_indices(tmp_path, frames=3).tolist() == [0, 1, 2, 3]
+
+
+def test_install_adds_the_stage_start_copies_when_asked(tmp_path):
+    write_episodes(tmp_path, [[0] * 10, [1] * 10, [2] * 10])
+    module = SimpleNamespace(EpisodeAwareSampler=None)
+    install(module, tmp_path, factor=1, start_factor=3, start_frames=2)
+    sampler = module.EpisodeAwareSampler(FROM, TO, shuffle=True, seed=0)
+    seen = counts(sampler)
+    assert len(sampler) == 30 + 3 * 2 * 2  # two extra copies of the first two frames of three stages
+    assert seen[0] == seen[1] == seen[10] == seen[21] == 3 and seen[2] == 1

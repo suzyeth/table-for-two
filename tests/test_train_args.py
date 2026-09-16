@@ -90,3 +90,10 @@ def test_core_settings_unchanged():
     args = build_args(make(True))
     assert "--policy.type=act" in args and "--steps=10" in args and "--policy.chunk_size=20" in args
 
+
+def test_stage_starts_are_oversampled_by_default():
+    from policy.pour_oversampling import START_FRAMES, START_OVERSAMPLE
+    from policy.train import build_parser
+
+    args = build_parser().parse_args(["--dataset-root", "data/d", "--output-dir", "outputs/o"])
+    assert args.start_oversample == START_OVERSAMPLE > 1 and args.start_frames == START_FRAMES > 0

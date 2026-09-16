@@ -106,10 +106,13 @@ def build_parser():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--amp", action="store_true",
                         help="automatic mixed precision (float16 autocast on CUDA); weights are still saved in float32")
-    from policy.pour_oversampling import POUR_OVERSAMPLE
+    from policy.pour_oversampling import POUR_OVERSAMPLE, START_FRAMES, START_OVERSAMPLE
 
     parser.add_argument("--pour-oversample", type=int, default=POUR_OVERSAMPLE,
                         help="show every pour frame this many times per epoch (1 = off); see policy/pour_oversampling.py")
+    parser.add_argument("--start-oversample", type=int, default=START_OVERSAMPLE,
+                        help="show the first --start-frames frames of every stage this many times per epoch (1 = off)")
+    parser.add_argument("--start-frames", type=int, default=START_FRAMES)
     parser.add_argument("--resume", type=Path,
                         help="continue the run that wrote this checkpoint's pretrained_model directory (its "
                              "training_state holds the step, optimizer, scheduler and RNG); --steps is the new total")
@@ -137,7 +140,7 @@ def main():
     lerobot_train.update_last_checkpoint = _write_pointer
     from policy.pour_oversampling import install
 
-    install(lerobot_train, args.dataset_root, args.pour_oversample)
+    install(lerobot_train, args.dataset_root, args.pour_oversample, args.start_oversample, args.start_frames)
     sys.argv = ["lerobot-train", *train_args]
     lerobot_train.main()
 
