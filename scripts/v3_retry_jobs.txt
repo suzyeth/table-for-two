@@ -1,0 +1,6 @@
+# Low-scoring stages only (pour, bottle return, hand-over) with per-stage time limits from the demo
+# durations (pour 60 s, hand-over 45 s): 100k (start-oversampled) and 80k side by side, so the effect of
+# the longer limit and of the retraining can be told apart; plus the 100k chained run for the full task.
+v3_100k_stagewise_low | .venv\Scripts\python.exe -m policy.rollout --stagewise --stages pour return handoff --ensemble 0.01 --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3_100k\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\100000\pretrained_model --out out\v3_100k_rollout_stagewise_low_seeds0-9.json
+v3_80k_stagewise_low | .venv\Scripts\python.exe -m policy.rollout --stagewise --stages pour return handoff --ensemble 0.01 --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3_80k\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\080000\pretrained_model --out out\v3_80k_rollout_stagewise_low_limits_seeds0-9.json
+v3_100k_policy_ens | .venv\Scripts\python.exe -m policy.rollout --mode policy --ensemble 0.01 --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3_100k\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\100000\pretrained_model --out out\v3_100k_rollout_policy_ens_seeds0-9.json
