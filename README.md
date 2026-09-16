@@ -37,7 +37,7 @@ flowchart LR
     V["Speech (Speechmatics)<br/>or typed instruction"] --> P
     P["Language planner<br/>Qwen2.5-1.5B INT4 · OpenVINO GenAI"] -->|"validated subtask plan"| E
     E["Stage executor<br/>subtask one-hot"] --> A
-    C["4 cameras 128×128 (2 scene + 2 wrist)<br/>+ 12 joint states"] --> A
+    C["4 cameras 128×128 (2 scene + 2 wrist)<br/>+ 12 joint positions and velocities"] --> A
     A["ACT visuomotor policy<br/>OpenVINO IR (FP32 / FP16 / INT8)"] -->|"12 joint targets @ 10 Hz"| S
     S["MuJoCo contact physics: 2 × SO-101<br/>drawer, plate, mug, bottle + bead water, utensils"] --> C
 ```
@@ -56,7 +56,7 @@ flowchart LR
    an end-to-end VLA).
 3. **Policy** — LeRobot ACT trained on scripted demonstrations, exported to
    OpenVINO and quantised to INT8 with NNCF. It sees four 128×128 cameras and
-   the joint positions, nothing else.
+   the positions and velocities of the 12 joints, nothing else.
 4. **Scripted skills** — generate the demonstrations and act as the fallback in
    hybrid mode (see below). They use ground-truth object poses and contact
    events from the simulator; the policy has to learn the same behaviour from
@@ -93,7 +93,7 @@ single-object labs and the per-stage tracer used to find each of these.
 | Task objects (child-tableware scale, sized for a 5 cm jaw) | cabinet with a full-extension drawer and bar pull; spoon and fork with chunky 10 mm handles (9.6 cm long, ~23 g); a 9 cm ramekin-sized deep dish (120 g); a 4.8 cm espresso mug (130 g); a 3.2 × 7 cm glass vial (40 g) with 24 water beads (6.5 ml); placemat |
 | Cameras | overhead, operator (behind the arms), front-high, one on each wrist |
 | Control | 20 Hz joint targets; policy at 10 Hz |
-| Randomisation per seed | object position ±1.2 cm (utensils ±4 mm, ±0.08 rad yaw), object mass ×0.8–1.2, pad friction ×0.7–1.3 (this is what changes grasps: the pads' friction governs every finger–object contact), object friction ×0.7–1.3 (sliding on the table), light ×0.6–1.2, table colour |
+| Randomisation per seed | object position ±1.2 cm (utensils ±4 mm, ±0.08 rad yaw), object mass ×0.8–1.2, pad friction ×0.7–1.3 (this is what changes grasps: the pads' friction governs every finger–object contact), object friction μ 0.4 ×0.7–1.3 (ceramic or glass sliding on wood; MuJoCo uses the larger of two surfaces' friction, so table and props are both 0.4), light ×0.6–1.2, table colour |
 | Success (scored 1 s after the last motion) | drawer open > 4.5 cm *now*; plate, fork, spoon and mug within 3 cm of their places, resting on the table only (not on each other), upright (< 12°) and released; ≥ 60 % of the beads at rest inside the mug with ≤ 2 spilled; bottle lifted, then standing upright within 3 cm of where it started |
 
 ## Results
@@ -137,55 +137,76 @@ through precondition completion or the keyword fallback):
 
 | Device | Plan latency mean / p95 (s) | Time to first token (ms) | Time per token (ms) | Tokens/s |
 |---|---|---|---|---|
-| CPU (i9-14900HX) | 2.19 / 6.14 | 704 | 24.0 | 41.7 |
-| Intel iGPU (Raptor Lake UHD) | 2.37 / 4.73 | 774 | 34.9 | 28.7 |
+| CPU (i9-14900HX) | 1.44 / 4.10 | 516 | 18.0 | 55.6 |
+| Intel iGPU (Raptor Lake UHD) | 2.34 / 4.69 | 759 | 34.7 | 28.8 |
 
-**Learned policy (v1: 150 demonstrations, 40k steps, four cameras).** Stage
-success on the ten evaluation seeds (`policy/rollout.py`; a stage counts only
-if the policy finished it inside 40 s; `home` stages are not scored). Measured
-in the earlier scene (prop friction 1.0, 4x anti-aliased cameras): there, the
-wrist-camera renders were not bit-exact, so the same seed could give a
-different rollout, and with 10 seeds a rate's 95% interval is about ±0.25 -
-read single cells with care. `policy/rollout.py` now scores 30 unseen seeds
-(1000–1029) with Wilson intervals in the current scene:
+**Learned policy (v3: 280 demonstrations, 120k steps, four cameras).** LeRobot
+ACT trained on 266 scripted episodes (14 held out) in the current scene, with
+the pour and the first frames of every stage oversampled (see Honest notes).
+Held-out validation loss kept falling to the end: 0.0222 at 80k, 0.0211 at
+100k, **0.0190 at 120k** (`tools/val_loss.py`, `out/act_contact_v3_val_loss_120k.json`).
+Stage success on the ten evaluation seeds with temporal ensembling and the
+oracle stage switch (`policy/rollout.py`; `home` stages are not scored). A
+stage counts only if the policy finishes it within its time limit: 60 s for
+the pour, 45 s for the hand-over, 40 s otherwise (the demonstrated pours take
+40 s on average, up to 47 s). With 10 seeds a rate's 95% interval is about
+±0.25 (Wilson intervals are in every report):
 
-| Stage | Chained, action queue | Chained, temporal ensemble | Each stage from a scripted start | Chained, INT8 |
+| Stage | Chained, FP32 | Chained, INT8 | Each stage from a scripted start | Stage from a scripted start at 100k |
 |---|---|---|---|---|
-| Two-handed plate carry | 9/10 | 10/10 | 9/10 | 9/10 |
-| Drawer + mug | 9/10 | 10/10 | 10/10 | 10/10 |
-| Bottle lift + fork | 8/10 | 10/10 | 10/10 | 8/10 |
-| Pour | 3/10 | 6/10 | 7/10 | 5/10 |
-| Bottle back | 5/10 | 6/10 | 10/10 | 5/10 |
-| Spoon hand-over | 2/10 | 0/10 | 9/10 | 1/10 |
-| **Whole table in one run** | **0/10** | **0/10** | — | **0/10** |
+| Two-handed plate carry | 10/10 | 10/10 | 9/10 (80k) | — |
+| Drawer + mug | 10/10 | 10/10 | 10/10 (80k) | — |
+| Bottle lift + fork | 8/10 | 8/10 | 10/10 (80k) | — |
+| Pour | 0/10 | 1/10 | **3/10** | 2/10 |
+| Bottle back | 6/10 | 9/10 | **10/10** | 9/10 |
+| Spoon hand-over | 3/10 | 0/10 | **5/10** | 0/10 |
+| **Whole table in one run** | **0/10** | **0/10** | — | — |
+
+(`out/v3_120k_rollout_policy_ens_seeds0-9.json`,
+`out/v3_120k_rollout_policy_int8_ens_seeds0-9.json`,
+`out/v3_120k_rollout_stagewise_{pour,return,handoff}_seeds0-9.json`; stages
+that already scored 9–10/10 from a scripted start at 80k were not re-run.)
+
+How to read this: the first three stages are learned. The pour is closer than
+its score: from a scripted start the policy gets 20.1 of the 24 beads into the
+mug on average (16–24; every seed clears the 60 % bar), but spills 3–8 beads in
+7 of 10 scenes against the ≤ 2 allowed. In the chained run it rarely gets that
+far: after its own bottle pick the water stays in the bottle in 6 of 10
+scenes. The hand-over went from 0/10 at 100k to 5/10 at 120k, and validation
+loss was still falling, so the policy is under-trained rather than stuck; we
+ran out of time to train further. The chain breaks where one stage leaves a
+state (the bottle's place in the fingers, where it was set down) that the next
+stage never saw in the demonstrations.
 
 Hybrid mode (a scripted skill finishes any stage the policy timed out on,
-counted as assisted, never as a success) sets no full table either: 1.9
-assisted stages per episode, most often the hand-over (8/10) and the pour
-(7/10).
-
-How to read this: every skill is learned — started from a clean scripted
-state, each stage succeeds 7–10 times in 10 — but the chain breaks because the
-states the policy leaves behind (where it set the bottle down, how the mug
-ended up) drift away from the demonstrations, so the later stages see inputs
-they were never trained on. Temporal ensembling (`--ensemble 0.01`: one
-inference per step, overlapping chunks blended with the ACT paper's weights)
-doubles the pour rate without retraining but has not yet made the hand-over
-work. A second policy trained on 300 demonstrations is in progress and this
-table will be extended with it.
+counted as assisted, never as a success): no full table
+either (0/10, `out/v3_120k_rollout_hybrid_ens_seeds0-9.json`). The script took over
+2.3 stages per episode (the pour 10/10 times, the hand-over 8, the bottle return
+3) and got the water in on 3 seeds and the spoon placed on 6, but starting from
+wherever the policy stopped, its motions knocked earlier work: the plate and the
+mug end in place 7/10 each, against 10/10 with the policy alone. Scripted skills
+are reliable from the states they planned for (the scripted pipeline: 10/10),
+not from arbitrary ones; the demo video therefore gives the stages the policy
+fails to the script from the start (see Honest notes).
 
 OpenVINO latency of the four-camera network, isolated single call (zero
-inputs, 200 calls; `bench/benchmark.py` writes `out/benchmark.md`):
+inputs, 200 calls, machine otherwise idle; `bench/benchmark.py` writes
+`out/benchmark.md`). Action error is the export's own check against FP32 on
+calibration frames (`models/<export>/export_report.json`):
 
 | Model | CPU mean / p95 (ms) | Intel iGPU mean / p95 (ms) | Size (MB) | Action error vs FP32, mean / max (rad) |
 |---|---|---|---|---|
-| FP32 | 19.6 / 27.7 | 14.2 / 16.3 | 136.8 | — |
-| FP16 | 17.1 / 20.1 | 13.8 / 14.3 | 68.4 | 0.00006 / 0.0007 |
-| INT8 (NNCF) | 7.0 / 7.9 | 14.8 / 15.6 | 38.6 | 0.0037 / 0.104 |
+| FP32 | 16.5 / 19.8 | 13.8 / 14.2 | 136.8 | — |
+| FP16 | 15.7 / 17.1 | 13.7 / 14.0 | 68.4 | 0.00007 / 0.0006 |
+| INT8 (NNCF) | 4.9 / 5.2 | 14.4 / 14.7 | 38.6 | 0.0050 / 0.423 |
 
-INT8 on CPU is the fastest configuration (142 calls/s); its worst-case action
-error of 0.10 rad (6°) is the likely reason the INT8 chained column sits a
-little below FP32. Every rollout report also records the in-the-loop cost
+INT8 on CPU is the fastest configuration (202 calls/s). Its worst case looks
+alarming — one output off by 0.42 rad on one calibration frame, against a mean
+of 0.005 — and in closed loop on seeds 0–9 the INT8 policy
+scores like FP32 within the noise of ten scenes (same first three stages; pour
+1 vs 0, bottle back 9 vs 6, hand-over 0 vs 3; neither sets a whole table). NNCF's accuracy-controlled mode (`--accuracy-control --max-drop
+0.02`) returned the same fully quantised model for the 80k checkpoint, because by
+NNCF's own metric the drop was only 0.008. Every rollout report also records the in-the-loop cost
 (render + preprocess + infer + postprocess) of its own run.
 
 ## Honest notes
@@ -235,11 +256,42 @@ little below FP32. Every rollout report also records the in-the-loop cost
   the policy, trained on the same demonstrations, run through OpenVINO) makes
   that call and the oracle only scores it. `home` stages are never scored, and
   a stage's success is also reported conditional on every earlier stage having
-  been solved by the policy. On v1 the learned switch is not usable yet: it
-  ends stages early, and the chained run with `--switch head` scores 7/10,
-  10/10, 10/10 and then 0/10 for the pour, the bottle return and the hand-over
-  (`out/rollout_policy_fp32_head.json`), so every number in the results table
-  uses the oracle switch.
+  been solved by the policy. The learned switch is not usable yet: trained on
+  the v3 demonstrations and run with the 80k v3 policy it ends stages early —
+  the plate carry scores 0/10 although the plate ends up placed in 9 of 10
+  runs — and gets 8/10 for the drawer + mug and the bottle + fork stages and
+  0/10 for the rest (`out/v3_80k_rollout_policy_ens_head_seeds0-9.json`), so
+  every number in the results table uses the oracle switch.
+- **A still hold at the end of every demonstrated stage taught the policy to
+  freeze.** The scripted skills end each stage with 2.5 s of standing still,
+  so an evaluation can switch stages where the demonstrations do. That is ~26
+  frames per stage saying "stay put", while a static arm starting to move shows
+  up only in the first frames of the next stage. The v3 policy at 80k steps
+  stopped at the start of the pour: 1/10 even from a clean scripted start
+  (v2, trained on demonstrations without the hold: 7/10), and in the seed-0
+  video the arms are all but still for 40% of the episode
+  (`out/v3_80k_seed0.mp4`). Training now shows the first 10 frames of every
+  stage five times per epoch (`policy/train.py --start-oversample`); from
+  100k steps on the policy no longer freezes.
+- **The scripted bottle return used to need the scripted bottle pick.** It
+  read the grasp that `side_pick_bottle` had planned, and did nothing if the
+  policy had picked the bottle up instead, so in hybrid runs and policy demos
+  "bottle put back" could never be finished by the script (hybrid, 80k: 0/10).
+  The return now reads the grasp off the hand holding the bottle
+  (`tests/test_return_after_policy_pick.py`); hybrid numbers above are from
+  after the fix.
+- **The demo packs steps into the stages the policy knows.** The policy was
+  trained on the default plan's stages, one of which has the left hand lay the
+  fork while the right hand lifts the bottle. A planner may write those as two
+  steps; `demo.py --executor policy` merges such neighbours back into the
+  two-arm stage before executing (same actions, done in parallel), and a step
+  the policy was never trained on is done by the scripted skill and captioned
+  so. The plan shown in the video is the planner's own output. Evaluation
+  (`policy/rollout.py`) runs the default plan and is not affected.
+  `--scripted-stages pour return handoff` hands the stages the policy fails
+  in evaluation to the scripted skill from the start (captioned "scripted
+  skill"), so the video is not a policy's failed attempt followed by a
+  takeover in a disturbed scene; the scores above are unaffected.
 - **The planner fills in preconditions.** If the language model writes
   "pour" without picking up the bottle, or asks for a fork with the drawer
   shut, `planner.complete()` inserts the missing steps and logs it; on 20
@@ -253,8 +305,13 @@ little below FP32. Every rollout report also records the in-the-loop cost
 - **Hybrid mode** is reported separately from pure-policy results: a stage the
   scripted skill had to finish is counted as assisted, never as a policy success.
 - **Runs are deterministic given the seed** (IK restarts are seeded per
-  episode); policy results on OpenVINO iGPU/INT8 may not be bit-stable, and are
-  single runs unless stated.
+  episode). Policy rollouts used not to be: with MuJoCo's default 4x
+  anti-aliasing the wrist-camera images of one state differed by a grey level
+  from render to render, and the closed loop grew that into a different
+  rollout. The scene now renders without multisampling (stills and videos for
+  people keep it); the same seed replays exactly, and two independent INT8
+  evaluations on seeds 0–9 gave identical per-stage counts. Every rate is
+  reported with its 95% Wilson interval, which for 10 scenes is wide.
 - An earlier version of this project (git history) attached objects to the
   gripper with weld constraints; it was replaced because that is not how a real
   gripper holds anything.
@@ -276,7 +333,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1    # Windows; add -
 
 This creates `.venv`, installs the pinned `requirements.txt`, clones only
 `robotstudio_so101` from MuJoCo Menagerie into `third_party/`, generates
-`scene/bimanual_table.xml` and runs the 21 unit tests. Below, `python` means
+`scene/bimanual_table.xml` and runs the unit tests (234, ~4 min). Below, `python` means
 `.venv/bin/python` (Linux) or `.venv\Scripts\python` (Windows; set
 `$env:PYTHONUTF8 = "1"` first).
 
@@ -307,35 +364,44 @@ Spoken input: copy `.env.example` to `.env`, add a Speechmatics key, then
 ### 4. Learned policy — optional; needs an NVIDIA GPU (or the released checkpoint)
 
 Download the trained checkpoint and OpenVINO IRs from the GitHub release
-(link to be added) and unpack them to `outputs/act_contact/` and
-`models/policy/`, or retrain:
+(link to be added) and unpack them to
+`outputs/act_contact_v3/checkpoints/120000/pretrained_model/` and
+`models/policy_v3_120k/`, or retrain:
 
 ```bash
 # Every command takes its data / model paths explicitly (no silent defaults to an older model).
 python -m tools.record_parallel --root data/contact_v3 --episodes 300   # 8 recorder processes, ~1-1.5 h -> data/contact_v3/merged
-python -m policy.train --dataset-root data/contact_v3/merged --output-dir outputs/act_contact_v3 --steps 40000
-                                                     # ~3.5 h on an RTX 4060 (install with --cuda); --device cpu works but takes days
-python -m policy.export_openvino --checkpoint outputs/act_contact_v3/checkpoints/040000/pretrained_model \
-    --dataset-root data/contact_v3/merged --out-dir models/policy_v3   # FP32 / FP16 / INT8 IR + accuracy report
-P="--policy models/policy_v3/act_fp32.xml --checkpoint outputs/act_contact_v3/checkpoints/040000/pretrained_model"
+python -m policy.train --dataset-root data/contact_v3/merged --output-dir outputs/act_contact_v3 --steps 120000 \
+    --start-oversample 5                             # ~10 h on an RTX 4060 (install with --cuda); --device cpu takes days
+                                                     # (ours ran in legs: 80k, then --resume <checkpoint>/pretrained_model)
+python -m tools.val_loss --output-dir outputs/act_contact_v3 --samples 3000   # held-out loss of every checkpoint
+python -m policy.export_openvino --checkpoint outputs/act_contact_v3/checkpoints/120000/pretrained_model \
+    --dataset-root data/contact_v3/merged --out-dir models/policy_v3_120k   # FP32 / FP16 / INT8 IR + accuracy report
+P="--policy models/policy_v3_120k/act_fp32.xml --checkpoint outputs/act_contact_v3/checkpoints/120000/pretrained_model"
 python -m policy.rollout $P --mode policy            # learned policy alone on 30 unseen scenes (seeds 1000-1029),
-                                                     # every rate with a 95% Wilson interval; 40 s per stage
+                                                     # 95% Wilson intervals; 60 s pour, 45 s hand-over, 40 s other stages
 python -m policy.rollout $P --mode hybrid            # a scripted skill finishes any timed-out stage (counted as assisted)
-python -m policy.rollout $P --stagewise              # each stage from a scripted start state
+python -m policy.rollout $P --stagewise              # each stage from a scripted start state (--stages pour handoff: a subset)
 python -m policy.stage_head train --dataset-root data/contact_v3/merged   # stage-completion head (~10 min GPU)
 python -m policy.stage_head export --dataset-root data/contact_v3/merged
 python -m policy.rollout $P --mode policy --switch head   # the policy side ends each stage; the oracle only scores
 python -m policy.rollout $P --mode policy --ensemble 0.01 # temporal ensembling: infer every step, blend overlapping chunks
-python -m bench.benchmark                            # planner + every IR in models/policy on CPU / iGPU / NPU
+python -m bench.benchmark --policy-dir models/policy_v3_120k   # planner + every IR in that export on CPU / iGPU / NPU
+python -m tools.fill_results --policy-report <policy.json> --hybrid-report <hybrid.json> \
+    --stagewise-report <stagewise.json> --export-dir models/policy_v3_120k   # slide numbers + README tables
 ```
 
 ### 5. Media — optional, not needed for any result
 
 ```bash
-python demo.py --executor policy --seed 8 --out out/demo_policy_seed8.mp4
-python -m sim.task --video out/grid_10seeds.mp4
+python demo.py --executor policy --policy models/policy_v3_120k/act_int8.xml \
+    --checkpoint outputs/act_contact_v3/checkpoints/120000/pretrained_model --seed 0 \
+    --scripted-stages pour return handoff --out out/demo_120k_final_seed0.mp4
+                                                     # every stage is captioned with who ran it; a stage the
+                                                     # policy times out on is finished by the script and marked so
+python -m tools.render_media all                     # cover stills + the 10-seed grid (scripted, anti-aliased)
 python -m piper.download_voices en_US-lessac-medium --download-dir models/tts
-python -m tools.voiceover && python -m tools.make_video --voice-dir out/voice
+python -m tools.voiceover && python -m tools.make_video --voice-dir out/voice --demo out/demo_120k_final_seed0.mp4
 cd docs/slides && npm ci && node build_deck.js       # Node 18+; the built table_for_two.pptx is tracked
 ```
 

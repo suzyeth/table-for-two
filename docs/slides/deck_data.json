@@ -4,37 +4,37 @@
   "event": "AI Infra Summit Hackathon · Intel Physical AI Online Challenge · September 2026",
   "planner": {
     "model": "Qwen2.5-1.5B-Instruct INT4 (OpenVINO GenAI)",
-    "cpu_latency_s": 2.12,
-    "igpu_latency_s": 2.22,
-    "unit_tests": 21
+    "cpu_latency_s": 1.44,
+    "igpu_latency_s": 2.34,
+    "unit_tests": 25
   },
   "data": {
-    "episodes": 150,
-    "frames": 115039,
+    "episodes": 280,
+    "frames": 405058,
     "fps": 10,
-    "train_steps": 40000,
+    "train_steps": 120000,
     "scripted_success_on_train_seeds": "29/30 on unseen seeds 1000-1029"
   },
   "latency": [
     {
       "label": "FP32 · CPU",
-      "ms": 15.8
+      "ms": 16.5
     },
     {
       "label": "INT8 · CPU",
-      "ms": 5.9
+      "ms": 4.9
     },
     {
       "label": "FP32 · Intel iGPU",
-      "ms": 10.1
+      "ms": 13.8
     },
     {
       "label": "FP16 · Intel iGPU",
-      "ms": 8.2
+      "ms": 13.7
     }
   ],
-  "int8_speedup": "2.7×",
-  "int8_action_error_rad": 0.02012,
+  "int8_speedup": "3.4×",
+  "int8_action_error_rad": 0.00501,
   "subgoals": [
     "Drawer opened",
     "Mug placed",
@@ -54,12 +54,28 @@
     10
   ],
   "scripted_full_task": 10,
-  "policy_10_seeds": null,
-  "hybrid_10_seeds": null,
-  "policy_full_task": null,
-  "hybrid_full_task": null,
-  "failure_note": null,
+  "policy_10_seeds": [
+    10,
+    10,
+    10,
+    9,
+    3,
+    0,
+    2
+  ],
+  "hybrid_10_seeds": [
+    "10 (0 assisted)",
+    "7 (0 assisted)",
+    "7 (0 assisted)",
+    "9 (2 assisted)",
+    "6 (8 assisted)",
+    "3 (10 assisted)",
+    "1 (3 assisted)"
+  ],
+  "policy_full_task": 0,
+  "hybrid_full_task": 0,
+  "failure_note": "Policy (120k steps): plate, drawer + mug, fork 8-10/10. From a scripted start: pour 3/10 (84% of the water in, but >2 beads spilled), bottle back 10/10, hand-over 5/10. Chained, those states drift and script takeovers knock placed items, so no run sets the whole table.",
   "hardware_note": "Measured on Intel Core i9-14900HX + Raptor Lake iGPU; bench/benchmark.py reproduces every number on a Core Ultra in one command.",
   "eval_seeds": 10,
-  "hybrid_assisted_per_episode": null
+  "hybrid_assisted_per_episode": 2.3
 }

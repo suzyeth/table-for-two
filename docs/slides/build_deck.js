@@ -79,8 +79,8 @@ function bullets(items) {
   const stages = [
     ["Speech or text", "Speechmatics transcribes a spoken instruction"],
     ["Planner", "Qwen2.5-1.5B INT4 on OpenVINO GenAI writes a checked plan"],
-    ["Stage executor", "Subtask token per stage; a learned stage-completion head (or the simulator oracle) ends it"],
-    ["ACT policy", "4 cameras (2 scene + 2 wrist) + 12 joints → 12 joint targets at 10 Hz, OpenVINO INT8"],
+    ["Stage executor", "Subtask token per stage; simulator state ends it (a learned head is experimental)"],
+    ["ACT policy", "4 cameras (2 scene + 2 wrist) + 12 joints → 12 joint targets, OpenVINO INT8"],
     ["MuJoCo", "Dual SO-101 arms, contact-only grasps, drawer, plate, mug, bead water, utensils"],
   ];
   const boxW = 2.2;
@@ -160,8 +160,8 @@ function bullets(items) {
     s.addText(small, { x, y: 2.6, w: 2.9, h: 0.4, fontFace: BODY, fontSize: 14, color: C.muted, margin: 0, isTextBox: true });
   });
   body(s, bullets([
-    "Inputs: overhead, operator and both wrist cameras (128 × 128), 12 joint positions, one-hot subtask from the planner",
-    "Output: the next 20 joint-target vectors; the arm executes 10 and re-plans every second",
+    "Inputs: overhead, operator and both wrist cameras (128 × 128), 12 joint positions and velocities, one-hot subtask from the planner",
+    "Output: the next 20 joint-target vectors at 10 Hz; inferred every step and the overlapping chunks blended (temporal ensembling)",
     `Demonstrations: scripted contact skills on randomised seeds (${data.data.scripted_success_on_train_seeds}); held-out seeds 0–9 never seen in training`,
     "No object is attached to a gripper: everything is held by finger contact and friction",
   ]), { x: M, y: 3.6, w: W - 2 * M, h: 2.8 });
@@ -207,7 +207,7 @@ function bullets(items) {
   const header = ["Sub-goal", "Scripted", "Learned policy", "Hybrid (policy + script)"].map((text) => ({
     text, options: { bold: true, color: C.white, fill: { color: C.dark }, fontFace: BODY, fontSize: 14 },
   }));
-  // Policy cells are counts out of n; hybrid cells are "policy-solved + assisted" strings.
+  // Policy cells are counts out of n; hybrid cells are "final count (assisted)" strings.
   const cell = (list, i) => (list ? (typeof list[i] === "string" ? list[i] : `${list[i]}/${n}`) : "pending");
   const rows = data.subgoals.map((name, i) => [
     { text: name, options: { fontFace: BODY, fontSize: 14, color: C.ink } },
@@ -233,17 +233,18 @@ function bullets(items) {
       x: M, y: 5.85, w: 7.6, h: 0.8, fontFace: BODY, fontSize: 13, italic: true, color: C.blue, margin: 0, isTextBox: true,
     });
   }
-  s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: 8.7, y: 1.6, w: 4.03, h: 3.64, rectRadius: 0.06, fill: { color: C.white }, line: { color: C.rule, width: 1 } });
+  s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: 8.7, y: 1.6, w: 4.03, h: 5.5, rectRadius: 0.06, fill: { color: C.white }, line: { color: C.rule, width: 1 } });
   s.addText("Honest limits", { x: 8.95, y: 1.8, w: 3.6, h: 0.45, fontFace: HEAD, fontSize: 18, bold: true, color: C.ink, margin: 0, isTextBox: true });
   body(s, bullets([
     "Gripper capped at the stock servo's sustainable 0.8 N·m with μ 0.8 pads (Menagerie's default is 12 V stall torque, μ 1); props are child-tableware scale",
     "Seeds 0–9 are the seeds the scripted skills were tuned on (seed 0 unrandomised); 30 unseen seeds are reported next to them",
-    "Stage boundaries and completion are judged from simulator state, and the policy is told the current stage",
+    "Stage completion is judged from simulator state and the policy is told the current stage",
     "The mug stands on the table during the pour — the other hand cannot steady it within reach",
     "Water is 24 small beads, not a fluid",
     "Hybrid: stages a script had to finish are counted as assisted, never as policy wins",
+    "Demo video: pour, bottle return and hand-over are run by the scripted skills, labelled on screen",
     "Benchmarked on Core i9 + iGPU; Core Ultra run is one command",
-  ]), { x: 8.95, y: 2.35, w: 3.6, h: 2.8, fontSize: 14 });
+  ]), { x: 8.95, y: 2.35, w: 3.6, h: 4.6, fontSize: 12 });
   s.addNotes("Randomisation per seed: object positions, masses, friction, lighting and table colour.");
 }
 
