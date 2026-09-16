@@ -1,0 +1,6 @@
+# v3 continued to 100k with the first frames of every stage oversampled (the 80k policy froze at the
+# start of the pour). Seeds 0-9 are the brief's ten scenes. Stagewise is the decisive test: pour and
+# hand-over were 1/10 and 0/10 at 80k even from a scripted start.
+v3_100k_stagewise | .venv\Scripts\python.exe -m policy.rollout --stagewise --ensemble 0.01 --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3_100k\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\100000\pretrained_model --out out\v3_100k_rollout_stagewise_ens_seeds0-9.json
+v3_100k_policy_ens | .venv\Scripts\python.exe -m policy.rollout --mode policy --ensemble 0.01 --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3_100k\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\100000\pretrained_model --out out\v3_100k_rollout_policy_ens_seeds0-9.json
+v3_100k_hybrid | .venv\Scripts\python.exe -m policy.rollout --mode hybrid --ensemble 0.01 --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3_100k\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\100000\pretrained_model --out out\v3_100k_rollout_hybrid_ens_seeds0-9.json

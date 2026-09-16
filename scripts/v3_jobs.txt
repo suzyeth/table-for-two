@@ -1,0 +1,9 @@
+# v3 evaluation, run by tools/run_parallel.py (at most 3 at once). Rendering is bit-exact now, so
+# results do not depend on running side by side. Seeds 0-9 are the brief's ten scenes; the
+# default seeds are 30 unseen ones (1000-1029).
+v3_policy_ens_brief    | .venv\Scripts\python.exe -m policy.rollout --mode policy --ensemble 0.01 --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\040000\pretrained_model --out out\v3_rollout_policy_ens_seeds0-9.json
+v3_policy_settle_brief | .venv\Scripts\python.exe -m policy.rollout --mode policy --ensemble 0.01 --settle --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\040000\pretrained_model --out out\v3_rollout_policy_ens_settle_seeds0-9.json
+v3_hybrid_ens_brief    | .venv\Scripts\python.exe -m policy.rollout --mode hybrid --ensemble 0.01 --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\040000\pretrained_model --out out\v3_rollout_hybrid_ens_seeds0-9.json
+v3_stagewise_ens_brief | .venv\Scripts\python.exe -m policy.rollout --stagewise --ensemble 0.01 --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\040000\pretrained_model --out out\v3_rollout_stagewise_ens_seeds0-9.json
+v3_policy_int8_brief   | .venv\Scripts\python.exe -m policy.rollout --mode policy --ensemble 0.01 --seeds 0 1 2 3 4 5 6 7 8 9 --policy models\policy_v3\act_int8.xml --checkpoint outputs\act_contact_v3\checkpoints\040000\pretrained_model --out out\v3_rollout_policy_int8_ens_seeds0-9.json
+v3_policy_ens_unseen   | .venv\Scripts\python.exe -m policy.rollout --mode policy --ensemble 0.01 --policy models\policy_v3\act_fp32.xml --checkpoint outputs\act_contact_v3\checkpoints\040000\pretrained_model --out out\v3_rollout_policy_ens_seeds1000-1029.json
