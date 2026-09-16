@@ -9,6 +9,8 @@ back, and hand the spoon from one arm to the other. Built for the **Intel
 Physical AI Online Challenge — Bimanual VLA Manipulation** at the AI Infra
 Summit Hackathon (lablab.ai, September 2026).
 
+**Video (2:52):** https://youtu.be/d6iiVpS3A5Q
+
 Everything runs in MuJoCo; every learned model runs through **OpenVINO**.
 
 **No object is ever attached to a gripper.** Every object moves only because
