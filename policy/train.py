@@ -30,6 +30,10 @@ N_ACTION_STEPS = 10  # re-plan every second
 # LeRobot keeps the last ceil(n * EVAL_SPLIT) episodes per task out of training (15 of 300), so
 # checkpoints can be compared on demos they never saw (review 2: there was no split at all).
 EVAL_SPLIT = 0.05
+# ... and scores them every EVAL_EVERY steps on up to EVAL_SAMPLES frames. LeRobot's default
+# eval_steps=0 never scores the held-out episodes at all (the v3 run logged no validation loss).
+EVAL_EVERY = 1000
+EVAL_SAMPLES = 2000
 # Image augmentation: LeRobot's colour and sharpness jitters, without its RandomAffine - shifting or
 # turning a wrist camera image would change what the policy sees of its own fingers. LeRobot's parser
 # cannot set one entry of this dict (``...tfs.affine.weight=0`` is rejected), so the whole dict is passed.
@@ -60,10 +64,12 @@ def _write_pointer(checkpoint_dir):
 def build_args(args):
     from data.record import REPO_ID
 
-    return [
+    built = [
         f"--dataset.repo_id={REPO_ID}",
         f"--dataset.root={args.dataset_root}",
         f"--dataset.eval_split={EVAL_SPLIT}",
+        f"--eval_steps={EVAL_EVERY}",
+        f"--max_eval_samples={EVAL_SAMPLES}",
         "--dataset.image_transforms.enable=true",
         "--dataset.image_transforms.tfs=" + json.dumps(COLOUR_TRANSFORMS),
         "--policy.type=act",
@@ -81,6 +87,10 @@ def build_args(args):
         "--wandb.enable=false",
         f"--policy.use_amp={'true' if args.amp else 'false'}",
     ]
+    resume = getattr(args, "resume", None)
+    if resume:  # continue that checkpoint's run: step, optimizer, scheduler and RNG come back with it
+        built += [f"--config_path={Path(resume).as_posix()}", "--resume=true"]
+    return built
 
 
 def build_parser():
@@ -100,6 +110,9 @@ def build_parser():
 
     parser.add_argument("--pour-oversample", type=int, default=POUR_OVERSAMPLE,
                         help="show every pour frame this many times per epoch (1 = off); see policy/pour_oversampling.py")
+    parser.add_argument("--resume", type=Path,
+                        help="continue the run that wrote this checkpoint's pretrained_model directory (its "
+                             "training_state holds the step, optimizer, scheduler and RNG); --steps is the new total")
     parser.add_argument("--dry-run", action="store_true", help="print the arguments without training")
     return parser
 
@@ -108,8 +121,10 @@ def main():
     args = build_parser().parse_args()
     if not (args.dataset_root / "meta" / "info.json").exists():
         raise SystemExit(f"no LeRobot dataset at {args.dataset_root}; run: python -m tools.record_parallel --root ...")
-    if args.output_dir.exists():
-        raise SystemExit(f"{args.output_dir} exists; choose another --output-dir or remove it first")
+    if args.output_dir.exists() and not args.resume:
+        raise SystemExit(f"{args.output_dir} exists; choose another --output-dir, remove it, or pass --resume")
+    if args.resume and not (args.resume / "train_config.json").exists():
+        raise SystemExit(f"no checkpoint to resume at {args.resume} (expected its train_config.json)")
 
     train_args = build_args(args)
     print("lerobot-train " + " ".join(train_args))
