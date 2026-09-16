@@ -193,7 +193,14 @@ little below FP32. Every rollout report also records the in-the-loop cost
   searched 12 mug positions × pour directions × steadying grips (body side-grip,
   handle pinch; 6 cm and 9 cm mugs), measuring the distance between the arms'
   collision bodies over every pour pose: the best layout left 3 mm, most
-  overlapped, and with a 9 cm mug no position allowed a full pour at all. So the
+  overlapped, and with a 9 cm mug no position allowed a full pour at all. A
+  second search (`tools/steady_search.py`, `out/steady_search.json`) tried the
+  grips the first one had not: a top-down pinch on the mug rim from 8
+  directions, with the mug on the table or lifted 4 or 8 cm towards the bottle,
+  at 20 mug positions, against the real pour planner. None of the 431
+  combinations kept 10 mm between the arms: wherever the left hand reaches the
+  rim, the arms overlap by at least 21 mm during the pour, and a lifted mug is
+  out of reach of a top-down hand (it tops out ~9 cm above the table). So the
   bimanual coordination is shown instead by the two-handed plate carry and the
   spoon hand-over.
 - **The hand-over holds the spoon off its balance point** (each hand 2.8 cm from
