@@ -31,7 +31,11 @@ from sim.env import ARMS, TABLE_TOP_Z, UPRIGHT_TOL_DEG, DinnerTableEnv
 from sim.task import ARM_KEY, DEFAULT_PLAN, Executor
 
 ROOT = Path(__file__).resolve().parent.parent
-STAGE_TIMEOUT_S = 40.0  # the longest contact stage (hand-over) takes ~25 s scripted
+STAGE_TIMEOUT_S = 40.0  # default time a policy gets for a stage
+# Stages whose demonstrations run long get at least 1.25x their longest demo, rounded up to 5 s. The v3
+# demos (280 episodes): pour 40.2 s mean / 47.1 s max, hand-over 32.9 / 33.3 s, every other stage
+# <= 22 s. At a flat 40 s three in four pours were cut off even at the demonstrated pace.
+SKILL_TIMEOUT_S = {"pour": 60.0, "handoff": 45.0}
 HOME_SECONDS = 2.0
 LIFTED_ABOVE_TABLE = 0.06
 CONFIRM_SECONDS = 1.0
@@ -43,6 +47,28 @@ CONFIRM_SECONDS = 1.0
 SETTLE_STILL_RAD = 0.01  # a command changing less than this per 10 Hz step counts as still
 SETTLE_STILL_STEPS = 20
 SETTLE_LIMIT_STEPS = 100  # 10 s
+
+
+def stage_timeout(stage):
+    """Seconds the policy gets for ``stage``: the longest limit of its subtasks."""
+    return max(SKILL_TIMEOUT_S.get(sub["skill"], STAGE_TIMEOUT_S) for sub in stage)
+
+
+def settled_census(env, stage):
+    """For a pour stage, the water census after the arms have been held still (else None).
+
+    A pour that misses the "<= 2 spilled" rule still shows how much water it got in; beads still
+    moving when a stage times out would be counted as spilled, so the water settles first.
+    """
+    if not any(sub["skill"] == "pour" for sub in stage):
+        return None
+    env.hold(CONFIRM_SECONDS)
+    return env.water_census()
+
+
+def stage_selected(stage, stages):
+    """True if ``stages`` (skill names, None = all) asks for any subtask of ``stage``."""
+    return stages is None or any(sub["skill"] in stages for sub in stage)
 
 
 def is_scored(stage):
@@ -110,7 +136,7 @@ def run_stage_policy(env, policy, stage, stage_index_in_vocab, frames=None, head
     policy.reset()
     if head is not None:
         head.reset()
-    steps = int(STAGE_TIMEOUT_S * 20 / RECORD_EVERY)
+    steps = int(stage_timeout(stage) * 20 / RECORD_EVERY)
     done_at, still, previous = None, 0, None
     for k in range(steps + SETTLE_LIMIT_STEPS):  # the extra steps only let a late success settle
         if k >= steps and done_at is None:
@@ -175,7 +201,7 @@ def evaluate(policy, seeds, plan, mode, video_frames=None, head=None, video_came
                 clean = False
         env.hold(CONFIRM_SECONDS)
         result = env.success()
-        per_seed.append({"seed": seed, "success": result, "stages": stages})
+        per_seed.append({"seed": seed, "success": result, "stages": stages, "water": env.water_census()})
         scored_stages = [s for s in stages if s["scored"]]
         policy_stages = sum(s["policy_ok"] for s in scored_stages)
         print(f"seed {seed}: all={result['all']} policy-solved stages {policy_stages}/{len(scored_stages)} "
@@ -184,19 +210,22 @@ def evaluate(policy, seeds, plan, mode, video_frames=None, head=None, video_came
     return per_seed
 
 
-def evaluate_stagewise(policy, seeds, plan, head=None, settle=False):
+def evaluate_stagewise(policy, seeds, plan, head=None, settle=False, stages=None):
     """Per-skill success: script every earlier stage, then let the policy do just this one.
 
     Chained rollouts hide which skills the policy has learned, because one failed
-    stage leaves every later stage in a state it never saw in training.
+    stage leaves every later stage in a state it never saw in training. ``stages``
+    (skill names) limits the run to those stages, e.g. the ones still failing.
     """
     env = DinnerTableEnv(obs_cameras=())
     executor = Executor(env)
     names = [stage_signature(stage) for stage in plan]
-    wins = {name: 0 for name in names if is_scored(plan[names.index(name)])}
+    wanted = [i for i, stage in enumerate(plan) if is_scored(stage) and stage_selected(stage, stages)]
+    wins = {names[i]: 0 for i in wanted}
+    pour_water = []  # beads in the mug / bottle / spilled after each pour attempt, once settled
     for seed in seeds:
         for index, stage in enumerate(plan):
-            if not is_scored(stage):
+            if index not in wanted:
                 continue
             env.reset(seed)
             executor.reset()
@@ -205,9 +234,13 @@ def evaluate_stagewise(policy, seeds, plan, head=None, settle=False):
                 executor.skills[arm].cmd = env.data.ctrl[env.act_idx[arm]].copy()
             ok = run_stage_policy(env, policy, stage, SUBTASK_VOCAB.index(names[index]), head=head, settle=settle)
             wins[names[index]] += ok
-        print(f"seed {seed}: cumulative per-stage wins {wins}")
+            census = settled_census(env, stage)
+            if census is not None:
+                pour_water.append({"seed": seed, "poured": bool(ok), **census})
+        print(f"seed {seed}: cumulative per-stage wins {wins}"
+              + (f"; pour water {pour_water[-1]}" if pour_water and pour_water[-1]["seed"] == seed else ""))
     env.close()
-    return {name: wins[name] / len(seeds) for name in wins}
+    return {name: wins[name] / len(seeds) for name in wins}, pour_water
 
 
 def wilson_interval(successes, n, z=1.96):
@@ -265,6 +298,8 @@ def build_parser():
                              "weights exp(-M*i) (ACT paper uses 0.01); default = LeRobot action queue")
     parser.add_argument("--stagewise", action="store_true",
                         help="score each stage separately, starting it from a scripted state")
+    parser.add_argument("--stages", nargs="+", metavar="SKILL",
+                        help="with --stagewise, score only stages with these skills (e.g. pour return handoff)")
     parser.add_argument("--plan", type=Path, help="JSON plan (e.g. from the planner); default plan otherwise")
     parser.add_argument("--video", type=Path)
     parser.add_argument("--video-cameras", default="operator",
@@ -284,11 +319,19 @@ def main():
         from policy.stage_head import OVStageHead
         head = OVStageHead(args.head, device=args.device)
     if args.stagewise:
-        per_stage = evaluate_stagewise(policy, args.seeds, plan, head, args.settle)
+        per_stage, pour_water = evaluate_stagewise(policy, args.seeds, plan, head, args.settle, args.stages)
         report = {"policy": str(args.policy), "mode": "stagewise", "switch": args.switch, "settle": args.settle,
-                  "ensemble": args.ensemble, "seeds": args.seeds, "per_stage_success": per_stage,
+                  "ensemble": args.ensemble, "seeds": args.seeds, "stages": args.stages,
+                  "stage_timeouts_s": {name: stage_timeout(stage) for name, stage in
+                                       zip(map(stage_signature, plan), plan)},
+                  "per_stage_success": per_stage,
                   "per_stage_ci95": {name: wilson_interval(round(rate * len(args.seeds)), len(args.seeds))
                                      for name, rate in per_stage.items()},
+                  "pour_water": {"per_seed": pour_water,
+                                 "mean_in_mug": round(float(np.mean([w["mug"] for w in pour_water])), 2)
+                                 if pour_water else None,
+                                 "mean_spilled": round(float(np.mean([w["spilled"] for w in pour_water])), 2)
+                                 if pour_water else None},
                   "policy_infer_ms_mean": round(float(np.mean(policy.infer_ms)), 3) if policy.infer_ms else None}
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")
@@ -299,6 +342,7 @@ def main():
                         tuple(c.strip() for c in args.video_cameras.split(",") if c.strip()), args.settle)
     report = {"policy": str(args.policy), "mode": args.mode, "switch": args.switch, "settle": args.settle,
               "ensemble": args.ensemble, "seeds": args.seeds,
+              "stage_timeouts_s": {stage_signature(stage): stage_timeout(stage) for stage in plan},
               "summary": summarise(per_seed, policy), "episodes": per_seed}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=1), encoding="utf-8")

@@ -161,3 +161,47 @@ def test_settling_takes_longer_than_any_pause_inside_a_demonstrated_stage():
 
     longest_demo_pause_s = (8 + POUR_HOLD_STEPS) / CONTROL_HZ  # the pour: wait(8) at full tilt, then the hold
     assert SETTLE_STILL_STEPS * rollout.RECORD_EVERY / 20 > longest_demo_pause_s
+
+
+POUR = [{"skill": "pour", "arm": "right", "into": "mug"}]
+HANDOFF = [{"skill": "handoff", "object": "spoon", "giver": "left", "receiver": "right"}]
+
+
+def test_long_stages_get_at_least_a_quarter_more_time_than_their_longest_demo():
+    """The v3 pour demos last 40.2 s on average and up to 47.1 s (hand-over up to 33.3 s), so the
+    40 s limit cut off three in four pours even at the demonstrated pace."""
+    assert rollout.stage_timeout(POUR) >= 1.25 * 47.1
+    assert rollout.stage_timeout(HANDOFF) >= 1.25 * 33.3
+    assert rollout.stage_timeout([{"skill": "pick_place", "arm": "right", "object": "mug"}]) == rollout.STAGE_TIMEOUT_S
+
+
+def test_a_pour_stage_runs_until_its_own_limit(monkeypatch):
+    policy = MovingThenStillPolicy(moving=10 ** 6)
+    monkeypatch.setattr(rollout, "stage_done", lambda env, stage, elapsed: False)
+    assert run_stage_policy(FakeEnv(), policy, POUR, 3) is False
+    assert policy.calls == int(rollout.stage_timeout(POUR) * 20 / rollout.RECORD_EVERY) > TOTAL_STEPS
+
+
+def test_stagewise_scores_only_the_stages_asked_for():
+    drawer_and_mug = [{"skill": "open_drawer", "arm": "left"}, {"skill": "pick_place", "arm": "right", "object": "mug"}]
+    assert rollout.stage_selected(POUR, None) and rollout.stage_selected(POUR, ["pour", "handoff"])
+    assert not rollout.stage_selected(drawer_and_mug, ["pour", "return", "handoff"])
+    assert rollout.stage_selected(drawer_and_mug, ["pick_place"])
+    args = rollout.build_parser().parse_args(["--policy", "m.xml", "--checkpoint", "c", "--stagewise",
+                                              "--stages", "pour", "return", "handoff"])
+    assert args.stages == ["pour", "return", "handoff"]
+    assert rollout.build_parser().parse_args(["--policy", "m.xml", "--checkpoint", "c"]).stages is None
+
+
+class WateredEnv(FakeEnv):
+    def water_census(self):
+        return {"mug": 20, "bottle": 1, "spilled": 3, "held_for": self.held}
+
+
+def test_a_pour_attempt_is_counted_in_beads_once_the_water_has_settled():
+    """A pour that misses the <= 2 spilled rule still shows how much water it got in; beads still
+    moving when the stage times out would count as spilled, so the arms are held still first."""
+    env = WateredEnv()
+    census = rollout.settled_census(env, POUR)
+    assert census["mug"] == 20 and census["held_for"] == rollout.CONFIRM_SECONDS
+    assert rollout.settled_census(WateredEnv(), HANDOFF) is None
